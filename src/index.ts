@@ -430,10 +430,16 @@ type AceStatusContext = { ui: { setStatus: (key: string, value: string | undefin
 let aceStatusSeq = 0;
 let activeAceStatusOwner = 0;
 
-function beginAceStatus(ctx: AceStatusContext, initial: string): { update: (value: string) => void; progress: (message: string) => void; clear: () => void } {
+function beginAceStatus(ctx: AceStatusContext, initial: string): { update: (value: string) => void; progress: (message: string) => void; finish: (value: string, clearAfterMs?: number) => void; clear: () => void } {
 	const owner = ++aceStatusSeq;
 	activeAceStatusOwner = owner;
 	ctx.ui.setStatus("ace-tool", initial);
+	const clearIfOwner = () => {
+		if (activeAceStatusOwner === owner) {
+			ctx.ui.setStatus("ace-tool", undefined);
+			activeAceStatusOwner = 0;
+		}
+	};
 	return {
 		update(value: string) {
 			if (activeAceStatusOwner === owner) ctx.ui.setStatus("ace-tool", value);
@@ -441,12 +447,12 @@ function beginAceStatus(ctx: AceStatusContext, initial: string): { update: (valu
 		progress(message: string) {
 			if (activeAceStatusOwner === owner) ctx.ui.setStatus("ace-tool", progressStatus(message));
 		},
-		clear() {
-			if (activeAceStatusOwner === owner) {
-				ctx.ui.setStatus("ace-tool", undefined);
-				activeAceStatusOwner = 0;
-			}
+		finish(value: string, clearAfterMs = 1600) {
+			if (activeAceStatusOwner !== owner) return;
+			ctx.ui.setStatus("ace-tool", value);
+			setTimeout(clearIfOwner, clearAfterMs);
 		},
+		clear: clearIfOwner,
 	};
 }
 
@@ -1011,6 +1017,7 @@ Required environment variables:
 
 			const projectRoot = path.resolve(args.trim() || ctx.cwd);
 			const aceStatus = beginAceStatus(ctx, "ace: indexing");
+			let statusFinished = false;
 			try {
 				const result = await indexProject(
 					projectRoot,
@@ -1022,8 +1029,10 @@ Required environment variables:
 					`Indexed ${projectRoot}\nfiles: ${result.stats.files}\nblobs: ${result.stats.totalBlobs}\ncached blobs: ${result.stats.cachedBlobs}\nnew blobs: ${result.stats.newBlobs}\nskipped files: ${result.stats.skippedFiles}\ndeleted files: ${result.stats.deletedFiles}`,
 					"info",
 				);
+				aceStatus.finish(`ace: indexed ${result.stats.files} files`);
+				statusFinished = true;
 			} finally {
-				aceStatus.clear();
+				if (!statusFinished) aceStatus.clear();
 			}
 		},
 	});
@@ -1095,6 +1104,9 @@ Required environment variables:
 					signal: ctx.signal,
 				});
 
+				clearInterval(waitingTimer);
+				ctx.ui.setWidget("ace-enhance", undefined);
+				aceStatus.update("ace: reviewing");
 				const reviewed = await ctx.ui.editor("Review enhanced prompt", result.text);
 				const finalPrompt = (reviewed ?? "").trim();
 				if (!finalPrompt) {
@@ -1141,6 +1153,7 @@ Required environment variables:
 
 		void (async () => {
 			const aceStatus = beginAceStatus(ctx, "ace: indexing");
+			let statusFinished = false;
 			try {
 				const result = await indexProject(
 					ctx.cwd,
@@ -1149,10 +1162,12 @@ Required environment variables:
 					ctx.signal,
 				);
 				ctx.ui.notify(`ace-tool background index complete: ${result.stats.files} files · ${result.stats.totalBlobs} blobs · ${result.stats.newBlobs} new`, "info");
+				aceStatus.finish(`ace: indexed ${result.stats.files} files`);
+				statusFinished = true;
 			} catch (error) {
 				ctx.ui.notify(`ace-tool background index failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
 			} finally {
-				aceStatus.clear();
+				if (!statusFinished) aceStatus.clear();
 			}
 		})();
 	});
