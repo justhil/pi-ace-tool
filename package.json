@@ -1,0 +1,31 @@
+{
+  "name": "pi-ace-tool",
+  "version": "0.1.0",
+  "description": "Pi extension that provides an Augment-compatible search_context tool implemented in TypeScript.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "augment",
+    "codebase-search",
+    "semantic-search"
+  ],
+  "license": "MIT",
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.8.3"
+  }
+}

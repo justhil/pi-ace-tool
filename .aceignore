@@ -1,0 +1,17 @@
+# ace-tool recommended ignores
+# Keep credentials, local agent config, generated indexes, and heavy artifacts out of remote indexing.
+.pi/
+.ace-tool/
+.env
+.env.*
+*.secret
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+coverage/
+dist/
+build/
+target/
+node_modules/

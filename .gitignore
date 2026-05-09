@@ -1,0 +1,10 @@
+node_modules/
+dist/
+build/
+.tmp-build/
+.ace-tool/
+.pi/
+.env
+.env.*
+*.log
+参考/
