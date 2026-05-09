@@ -28,6 +28,41 @@ export interface IndexStats {
 export const CURRENT_INDEX_VERSION = 1;
 const MAX_INDEX_BYTES = 256 * 1024 * 1024;
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+	return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function normalizeFileEntry(value: unknown): FileEntry | undefined {
+	if (!isPlainObject(value)) return undefined;
+	if (typeof value.mtimeMs !== "number" || !Number.isFinite(value.mtimeMs)) return undefined;
+	if (typeof value.size !== "number" || !Number.isFinite(value.size) || value.size < 0) return undefined;
+	if (value.mtimeNs !== undefined && typeof value.mtimeNs !== "string") return undefined;
+	if (!Array.isArray(value.blobHashes) || value.blobHashes.some((hash) => typeof hash !== "string" || !hash)) return undefined;
+	return {
+		mtimeMs: value.mtimeMs,
+		mtimeNs: value.mtimeNs,
+		size: value.size,
+		blobHashes: value.blobHashes,
+	};
+}
+
+function normalizeIndexData(value: unknown, configHash: string): IndexData | undefined {
+	if (!isPlainObject(value)) return undefined;
+	if (value.version !== CURRENT_INDEX_VERSION) return undefined;
+	if (value.configHash !== configHash) return undefined;
+	if (!isPlainObject(value.entries)) return undefined;
+
+	const entries: Record<string, FileEntry> = {};
+	for (const [relativePath, entryValue] of Object.entries(value.entries)) {
+		if (!relativePath || path.isAbsolute(relativePath) || relativePath.includes("\\") || relativePath.split("/").includes("..")) return undefined;
+		const entry = normalizeFileEntry(entryValue);
+		if (!entry) return undefined;
+		entries[relativePath] = entry;
+	}
+
+	return { version: CURRENT_INDEX_VERSION, configHash, entries };
+}
+
 export function emptyIndex(configHash: string): IndexData {
 	return {
 		version: CURRENT_INDEX_VERSION,
@@ -86,15 +121,8 @@ export async function loadIndex(projectRoot: string, configHash: string, dirName
 		const metadata = await stat(indexPath);
 		if (metadata.size > MAX_INDEX_BYTES) return emptyIndex(configHash);
 		const raw = await readFile(indexPath, "utf8");
-		const parsed = JSON.parse(raw) as Partial<IndexData>;
-		if (parsed.version !== CURRENT_INDEX_VERSION) return emptyIndex(configHash);
-		if (parsed.configHash !== configHash) return emptyIndex(configHash);
-		if (!parsed.entries || typeof parsed.entries !== "object") return emptyIndex(configHash);
-		return {
-			version: CURRENT_INDEX_VERSION,
-			configHash,
-			entries: parsed.entries as Record<string, FileEntry>,
-		};
+		const parsed = normalizeIndexData(JSON.parse(raw), configHash);
+		return parsed ?? emptyIndex(configHash);
 	} catch {
 		return emptyIndex(configHash);
 	}
@@ -104,7 +132,7 @@ export async function saveIndex(projectRoot: string, data: IndexData, dirName = 
 	await ensureIndexDir(projectRoot, dirName);
 	const indexPath = getIndexFilePath(projectRoot, dirName, fileName);
 	const tempPath = `${indexPath}.tmp-${process.pid}-${Date.now()}`;
-	await writeFile(tempPath, JSON.stringify(data, null, 2), "utf8");
+	await writeFile(tempPath, JSON.stringify(data), "utf8");
 	try {
 		await rename(tempPath, indexPath);
 	} catch (error) {

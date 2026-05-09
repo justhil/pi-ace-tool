@@ -22,6 +22,7 @@
 - `search_context`：使用自然语言查询项目实现、调用链、功能流程
 - 默认使用 pi 当前工作目录作为项目根目录
 - 支持 `project_root_path` 参数覆盖项目根目录
+- 支持 Windows、WSL `/mnt/<drive>/...` 和 `\\wsl.localhost\...` / `\\wsl$\...` 路径归一化
 - 遵守根目录 `.gitignore` 和 `.aceignore`（常用 gitignore 子集）
 - 默认额外排除 `.pi/`，避免上传扩展配置和 token
 
@@ -30,7 +31,9 @@
 - 本地缓存：`.ace-tool/index.json`
 - 记录文件 `mtime`、`mtimeNs`、size、blob hashes
 - 低精度 mtime 场景自动回退 hash 校验，避免漏掉变更
+- 索引缓存读取时执行 schema 校验，缓存损坏或路径异常时自动重建
 - 只处理新增、修改、删除的文件
+- 动态上传队列：保持当前并发，单个 batch 完成后立即补位，避免慢 batch 阻塞整波上传
 - 自适应上传策略：参考 ace-tool-rs AIMD 思路动态调整并发和超时
 
 ### pi 原生体验

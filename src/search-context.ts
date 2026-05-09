@@ -1,5 +1,4 @@
 import { cpus } from "node:os";
-import path from "node:path";
 import { access, stat } from "node:fs/promises";
 import type { AceToolConfig } from "./config.js";
 import { getUploadStrategy } from "./config.js";
@@ -8,6 +7,7 @@ import { collectFileCandidates, type FileCandidate } from "./scanner.js";
 import { emptyIndex, getAllBlobHashes, loadIndex, saveIndex, type FileEntry, type IndexData, type IndexStats } from "./cache.js";
 import { searchCodebase, uploadBlobs } from "./api.js";
 import { buildSearchResultHeader, extractResultPaths } from "./results.js";
+import { normalizeProjectPath } from "./path-normalizer.js";
 
 export interface SearchContextParams {
 	query: string;
@@ -247,7 +247,7 @@ export async function runSearchContext(params: SearchContextParams, config: AceT
 	const query = params.query?.trim();
 	if (!query) throw new Error("query is required");
 
-	const projectRoot = path.resolve(params.projectRootPath || cwd);
+	const projectRoot = normalizeProjectPath(params.projectRootPath, cwd);
 	await assertProjectRoot(projectRoot);
 
 	const { index, stats, partial } = await indexProject(projectRoot, config, onProgress, signal);

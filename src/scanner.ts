@@ -308,6 +308,12 @@ export function toRelativePosix(root: string, target: string): string {
 	return toPosix(path.relative(root, target));
 }
 
+function isSafeRelativePath(relativePath: string): boolean {
+	return Boolean(relativePath)
+		&& !path.isAbsolute(relativePath)
+		&& !relativePath.split("/").includes("..");
+}
+
 function stripIgnoreComment(line: string): string {
 	let escaped = false;
 	for (let i = 0; i < line.length; i += 1) {
@@ -445,6 +451,7 @@ export async function collectFileCandidates(projectRoot: string, options: ScanOp
 		for await (const entry of dir) {
 			const absolutePath = path.join(directory, entry.name);
 			const relativePath = toRelativePosix(root, absolutePath);
+			if (!isSafeRelativePath(relativePath)) continue;
 
 			if (entry.isSymbolicLink()) continue;
 

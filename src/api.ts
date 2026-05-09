@@ -253,38 +253,70 @@ export async function uploadBlobs(config: AceToolConfig, blobs: BlobChunk[], bat
 	let failedBatches = 0;
 	let nextIndex = 0;
 	let completed = 0;
+	let active = 0;
+	let settled = false;
 	const strategy = new AdaptiveUploadStrategy(concurrency, timeoutMs);
 
 	onProgress?.(`Adaptive upload started: ${batches.length} batches, initial concurrency ${strategy.concurrency()}, timeout ${Math.round(strategy.timeoutMs() / 1000)}s`);
 
-	async function runWave(): Promise<void> {
-		const waveSize = Math.max(1, Math.min(strategy.concurrency(), batches.length - nextIndex));
-		const indices = Array.from({ length: waveSize }, () => nextIndex++);
-		const results = await Promise.all(indices.map(async (index) => {
-			if (signal?.aborted) throw new Error("Operation aborted");
-			const batch = batches[index] ?? [];
-			return uploadBatch(config, batch, strategy.timeoutMs(), signal);
-		}));
+	if (batches.length === 0) {
+		return { uploadedBlobNames, failedBatches, finalConcurrency: strategy.concurrency(), finalTimeoutMs: strategy.timeoutMs() };
+	}
 
-		for (const result of results) {
-			completed += 1;
-			if (result.success) {
-				uploadedBlobNames.push(...result.blobNames);
-			} else {
-				failedBatches += 1;
+	await new Promise<void>((resolve, reject) => {
+		const rejectOnce = (error: unknown) => {
+			if (settled) return;
+			settled = true;
+			reject(error);
+		};
+
+		const resolveIfDone = () => {
+			if (!settled && completed >= batches.length && active === 0) {
+				settled = true;
+				resolve();
+			}
+		};
+
+		const launchMore = () => {
+			if (settled) return;
+			if (signal?.aborted) {
+				rejectOnce(new Error("Operation aborted"));
+				return;
 			}
 
-			const adjustment = strategy.recordOutcome(result.success, result.latencyMs, result.errorType);
-			if (adjustment.message) onProgress?.(adjustment.message);
-		}
+			while (active < strategy.concurrency() && nextIndex < batches.length) {
+				const batchIndex = nextIndex++;
+				const batch = batches[batchIndex] ?? [];
+				active += 1;
 
-		onProgress?.(`Uploaded ${completed}/${batches.length} batches${failedBatches ? ` (${failedBatches} failed)` : ""}; concurrency ${strategy.concurrency()}, timeout ${Math.round(strategy.timeoutMs() / 1000)}s`);
-	}
+				void uploadBatch(config, batch, strategy.timeoutMs(), signal)
+					.then((result) => {
+						if (settled) return;
+						completed += 1;
+						if (result.success) uploadedBlobNames.push(...result.blobNames);
+						else failedBatches += 1;
 
-	while (nextIndex < batches.length) {
-		if (signal?.aborted) throw new Error("Operation aborted");
-		await runWave();
-	}
+						const adjustment = strategy.recordOutcome(result.success, result.latencyMs, result.errorType);
+						if (adjustment.message) onProgress?.(adjustment.message);
+						onProgress?.(`Uploaded ${completed}/${batches.length} batches${failedBatches ? ` (${failedBatches} failed)` : ""}; concurrency ${strategy.concurrency()}, timeout ${Math.round(strategy.timeoutMs() / 1000)}s`);
+					})
+					.catch((error) => {
+						rejectOnce(error);
+					})
+					.finally(() => {
+						active -= 1;
+						if (!settled) {
+							launchMore();
+							resolveIfDone();
+						}
+					});
+			}
+
+			resolveIfDone();
+		};
+
+		launchMore();
+	});
 
 	return {
 		uploadedBlobNames,

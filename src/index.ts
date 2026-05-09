@@ -2,7 +2,6 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { SelectList, Text, truncateToWidth, type Component, type SelectItem, type SelectListTheme, type TUI } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
-import path from "node:path";
 import {
 	deleteStoredConfig,
 	getConfigFilePath,
@@ -18,6 +17,7 @@ import { initAceProject } from "./init.js";
 import { enhancePrompt, stripEnhanceMarkers } from "./prompt-enhancer.js";
 import { clearIndex, getIndexFilePath, loadIndex } from "./cache.js";
 import { calculateConfigHash } from "./chunker.js";
+import { normalizeProjectPath } from "./path-normalizer.js";
 
 const SEARCH_CONTEXT_PARAMS = Type.Object({
 	query: Type.String({
@@ -1103,7 +1103,7 @@ Required environment variables:
 		description: "Show pi-ace-tool configuration and local index status",
 		handler: async (args, ctx) => {
 			const config = loadConfig(ctx.cwd);
-			const projectRoot = path.resolve(args.trim() || ctx.cwd);
+			const projectRoot = normalizeProjectPath(args.trim(), ctx.cwd);
 			const configHash = calculateConfigHash(config.maxLinesPerBlob);
 			const index = await loadIndex(projectRoot, configHash, config.indexDirName, config.indexFileName);
 			const fileCount = Object.keys(index.entries).length;
@@ -1125,7 +1125,7 @@ Required environment variables:
 		description: "Clear the local ace-tool index cache for the current project or supplied path",
 		handler: async (args, ctx) => {
 			const config = loadConfig(ctx.cwd);
-			const projectRoot = path.resolve(args.trim() || ctx.cwd);
+			const projectRoot = normalizeProjectPath(args.trim(), ctx.cwd);
 			await clearIndex(projectRoot, config.indexDirName, config.indexFileName);
 			ctx.ui.notify(`Cleared ace-tool index cache for ${projectRoot}. Run /ace-index to rebuild it now, or let the next search_context call rebuild it.`, "info");
 		},
@@ -1134,7 +1134,7 @@ Required environment variables:
 	pi.registerCommand("ace-init", {
 		description: "Initialize ace-tool project ignores (.aceignore and .gitignore)",
 		handler: async (args, ctx) => {
-			const projectRoot = path.resolve(args.trim() || ctx.cwd);
+			const projectRoot = normalizeProjectPath(args.trim(), ctx.cwd);
 			const ok = await ctx.ui.confirm(
 				"Initialize ace-tool ignores?",
 				`This will update .aceignore and .gitignore for:\n${projectRoot}\n\nRecommended ignores protect .pi/, .ace-tool/, env files, keys, certificates, and common build artifacts.`,
@@ -1168,7 +1168,7 @@ Required environment variables:
 				return;
 			}
 
-			const projectRoot = path.resolve(args.trim() || ctx.cwd);
+			const projectRoot = normalizeProjectPath(args.trim(), ctx.cwd);
 			const aceStatus = beginAceStatus(ctx, "ace: indexing");
 			let statusFinished = false;
 			try {
@@ -1214,7 +1214,7 @@ Required environment variables:
 				return;
 			}
 
-			const projectRoot = path.resolve(parsed.projectRoot || ctx.cwd);
+			const projectRoot = normalizeProjectPath(parsed.projectRoot, ctx.cwd);
 			const includeSearchContext = parsed.includeContextOverride ?? config.promptEnhancerIncludeSearchContext;
 			const issues = validateConfig(config);
 			if ((config.promptEnhancerMode === "official" || includeSearchContext) && issues.length > 0) {
