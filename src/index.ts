@@ -1,6 +1,6 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { SelectList, Text, wrapTextWithAnsi, type Component, type SelectItem, type SelectListTheme, type TUI } from "@earendil-works/pi-tui";
+import { SelectList, Text, truncateToWidth, type Component, type SelectItem, type SelectListTheme, type TUI } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import path from "node:path";
 import {
@@ -488,14 +488,10 @@ function hasSearchContextTool(event: { systemPromptOptions?: { selectedTools?: u
 function configFieldDetails(field: ConfigField, config: StoredAceToolConfig): string {
 	return [
 		field.description,
-		"",
 		`环境变量：${field.env}`,
-		`配置文件字段：${String(field.key)}`,
-		`当前值：${formatStoredValue(field, config)}`,
-		`默认值：${field.defaultValue === undefined ? "无" : field.defaultValue}`,
-		`是否必填：${field.required ? "是" : "否"}`,
-		"",
-		"优先级：环境变量 > 项目配置 > 全局配置 > 默认值。"
+		`配置字段：${String(field.key)}`,
+		`当前值：${formatStoredValue(field, config)} · 默认：${field.defaultValue === undefined ? "无" : field.defaultValue}`,
+		`必填：${field.required ? "是" : "否"} · 优先级：环境变量 > 项目 > 全局 > 默认`,
 	].join("\n");
 }
 
@@ -530,10 +526,17 @@ function selectTheme(theme: ConfigTheme): SelectListTheme {
 	};
 }
 
-function compactDetails(value: string, maxLines = 9): string[] {
-	const lines = value.split(/\r?\n/).map((line) => line.trimEnd());
-	if (lines.length <= maxLines) return lines;
-	return [...lines.slice(0, maxLines - 1), "…"];
+const CONFIG_DETAIL_PREVIEW_LINES = 5;
+
+function fixedDetailLines(value: string, width: number, lineCount = CONFIG_DETAIL_PREVIEW_LINES): string[] {
+	const maxWidth = Math.max(20, width - 4);
+	const source = value
+		.split(/\r?\n/)
+		.map((line) => line.replace(/\s+/g, " ").trim())
+		.filter(Boolean);
+	const lines = source.slice(0, lineCount).map((line) => truncateToWidth(line, maxWidth, "…"));
+	while (lines.length < lineCount) lines.push("");
+	return lines;
 }
 
 async function selectConfigItem(ctx: ConfigUiContext, title: string, items: ConfigSelectItem[], maxVisible = 8): Promise<string | undefined> {
@@ -556,12 +559,12 @@ async function selectConfigItem(ctx: ConfigUiContext, title: string, items: Conf
 			render(width: number): string[] {
 				const selected = selectList.getSelectedItem();
 				const details = selected ? detailByValue.get(selected.value) ?? "" : "";
-				const detailLines = compactDetails(details)
-					.flatMap((line) => line ? wrapTextWithAnsi(line, Math.max(20, width - 4)) : [""])
-					.map((line) => `  ${theme.fg("muted", line)}`);
+				const detailLines = fixedDetailLines(details, width)
+					.map((line) => `  ${line ? theme.fg("muted", line) : ""}`);
 				return [
 					theme.fg("accent", theme.bold(title)),
-					...(detailLines.length > 0 ? ["", ...detailLines] : []),
+					"",
+					...detailLines,
 					"",
 					...selectList.render(width),
 					"",
