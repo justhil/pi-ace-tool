@@ -300,6 +300,35 @@ function formatElapsed(startedAt: number | undefined): string {
 	return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s`;
 }
 
+function progressStageZh(message: string): string {
+	const lower = message.toLowerCase();
+	if (lower.includes("scanning")) return "扫描文件";
+	if (lower.includes("upload")) return "上传索引";
+	if (lower.includes("search")) return "检索上下文";
+	if (lower.includes("enhanc")) return "等待模型增强";
+	if (lower.includes("process") || lower.includes("found")) return "处理索引";
+	return "处理中";
+}
+
+function enhanceWaitingLines(options: {
+	frame: number;
+	startedAt: number;
+	mode: string;
+	model?: string;
+	includeContext: boolean;
+	status: string;
+	prompt: string;
+}): string[] {
+	const stage = progressStageZh(options.status);
+	return [
+		`${spinnerFrame(options.frame)} ace-enhance · ${stage} · ${formatElapsed(options.startedAt)}`,
+		`模式：${options.mode}${options.model ? ` · 模型：${options.model}` : ""}`,
+		`代码库上下文：${options.includeContext ? "开启" : "关闭"}`,
+		`状态：${options.status}`,
+		`提示词：${firstLine(options.prompt, 96)}`,
+	];
+}
+
 function renderSearchPreview(content: unknown, maxLines = 8): string[] {
 	if (!Array.isArray(content)) return [];
 	const textContent = content.find((item) => item?.type === "text") as { text?: string } | undefined;
@@ -998,6 +1027,23 @@ Required environment variables:
 				return;
 			}
 			ctx.ui.setStatus("ace-tool", includeSearchContext ? "ace: enhancing+context" : "ace: enhancing");
+			const startedAt = Date.now();
+			let frame = 0;
+			let latestStatus = includeSearchContext ? "准备检索代码库上下文..." : "正在等待提示词增强结果...";
+			const modelLabel = model ? modelKey(model) : undefined;
+			const renderWaiting = () => {
+				ctx.ui.setWidget("ace-enhance", enhanceWaitingLines({
+					frame: frame++,
+					startedAt,
+					mode: config.promptEnhancerMode,
+					model: modelLabel,
+					includeContext: includeSearchContext,
+					status: latestStatus,
+					prompt,
+				}));
+			};
+			renderWaiting();
+			const waitingTimer = setInterval(renderWaiting, 800);
 			try {
 				const result = await enhancePrompt(config, {
 					mode: config.promptEnhancerMode,
@@ -1007,7 +1053,11 @@ Required environment variables:
 					includeSearchContext,
 					model,
 					auth: auth && auth.ok ? { apiKey: auth.apiKey, headers: auth.headers } : undefined,
-					onProgress: (message) => ctx.ui.setStatus("ace-tool", progressStatus(message)),
+					onProgress: (message) => {
+						latestStatus = message;
+						ctx.ui.setStatus("ace-tool", progressStatus(message));
+						renderWaiting();
+					},
 					signal: ctx.signal,
 				});
 
@@ -1035,6 +1085,8 @@ Required environment variables:
 					);
 				}
 			} finally {
+				clearInterval(waitingTimer);
+				ctx.ui.setWidget("ace-enhance", undefined);
 				ctx.ui.setStatus("ace-tool", undefined);
 			}
 		},
