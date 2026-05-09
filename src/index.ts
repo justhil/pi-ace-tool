@@ -408,12 +408,46 @@ function updateConfigStatus(ctx: ConfigUiContext): void {
 
 function progressStatus(message: string): string {
 	const lower = message.toLowerCase();
+	const processed = message.match(/Processed\s+(\d+)\/(\d+)\s+files/i);
+	if (processed) return `ace: indexing ${processed[1]}/${processed[2]}`;
+	const found = message.match(/Found\s+(\d+)\s+files/i);
+	if (found) return `ace: indexing 0/${found[1]}`;
+	const uploadStart = message.match(/Uploading\s+(\d+)\s+new chunks/i);
+	if (uploadStart) return `ace: uploading ${uploadStart[1]} chunks`;
+	const uploadBatches = message.match(/Uploaded\s+(\d+)\/(\d+)\s+batches/i) ?? message.match(/started:\s+(\d+)\s+batches/i);
+	if (uploadBatches) return uploadBatches[2] ? `ace: uploading ${uploadBatches[1]}/${uploadBatches[2]}` : `ace: uploading 0/${uploadBatches[1]}`;
+	const searching = message.match(/Searching\s+(\d+)\s+chunks/i);
+	if (searching) return `ace: searching ${searching[1]} chunks`;
 	if (lower.includes("scanning")) return "ace: scanning";
 	if (lower.includes("upload")) return "ace: uploading";
 	if (lower.includes("search")) return "ace: searching";
 	if (lower.includes("enhanc")) return "ace: enhancing";
 	if (lower.includes("process") || lower.includes("found")) return "ace: indexing";
 	return "ace: working";
+}
+
+type AceStatusContext = { ui: { setStatus: (key: string, value: string | undefined) => void } };
+let aceStatusSeq = 0;
+let activeAceStatusOwner = 0;
+
+function beginAceStatus(ctx: AceStatusContext, initial: string): { update: (value: string) => void; progress: (message: string) => void; clear: () => void } {
+	const owner = ++aceStatusSeq;
+	activeAceStatusOwner = owner;
+	ctx.ui.setStatus("ace-tool", initial);
+	return {
+		update(value: string) {
+			if (activeAceStatusOwner === owner) ctx.ui.setStatus("ace-tool", value);
+		},
+		progress(message: string) {
+			if (activeAceStatusOwner === owner) ctx.ui.setStatus("ace-tool", progressStatus(message));
+		},
+		clear() {
+			if (activeAceStatusOwner === owner) {
+				ctx.ui.setStatus("ace-tool", undefined);
+				activeAceStatusOwner = 0;
+			}
+		},
+	};
 }
 
 function buildAceSystemPrompt(cwd: string): string {
@@ -807,7 +841,7 @@ Required environment variables:
 				throw new Error(`ace-tool configuration error:\n- ${issues.join("\n- ")}`);
 			}
 
-			ctx.ui.setStatus("ace-tool", "ace: indexing");
+			const aceStatus = beginAceStatus(ctx, "ace: indexing");
 			const startedAt = Date.now();
 			let frame = 0;
 			try {
@@ -819,7 +853,7 @@ Required environment variables:
 					config,
 					ctx.cwd,
 					(message) => {
-						ctx.ui.setStatus("ace-tool", progressStatus(message));
+						aceStatus.progress(message);
 						onUpdate?.({
 							content: [{ type: "text", text: message }],
 							details: {
@@ -839,7 +873,7 @@ Required environment variables:
 					details: { ...result.details, query: params.query, startedAt },
 				};
 			} finally {
-				ctx.ui.setStatus("ace-tool", undefined);
+				aceStatus.clear();
 			}
 		},
 
@@ -976,12 +1010,12 @@ Required environment variables:
 			}
 
 			const projectRoot = path.resolve(args.trim() || ctx.cwd);
-			ctx.ui.setStatus("ace-tool", "ace: indexing");
+			const aceStatus = beginAceStatus(ctx, "ace: indexing");
 			try {
 				const result = await indexProject(
 					projectRoot,
 					config,
-					(message) => ctx.ui.setStatus("ace-tool", progressStatus(message)),
+					(message) => aceStatus.progress(message),
 					ctx.signal,
 				);
 				ctx.ui.notify(
@@ -989,7 +1023,7 @@ Required environment variables:
 					"info",
 				);
 			} finally {
-				ctx.ui.setStatus("ace-tool", undefined);
+				aceStatus.clear();
 			}
 		},
 	});
@@ -1026,7 +1060,7 @@ Required environment variables:
 				ctx.ui.notify(`ace-tool configuration error:\n- ${issues.join("\n- ")}\n\nOfficial enhancement and context injection require /ace-config. Switch prompt enhancer mode to pi-model and disable context injection to enhance without ACE API config.`, "warning");
 				return;
 			}
-			ctx.ui.setStatus("ace-tool", includeSearchContext ? "ace: enhancing+context" : "ace: enhancing");
+			const aceStatus = beginAceStatus(ctx, includeSearchContext ? "ace: enhancing+context" : "ace: enhancing");
 			const startedAt = Date.now();
 			let frame = 0;
 			let latestStatus = includeSearchContext ? "准备检索代码库上下文..." : "正在等待提示词增强结果...";
@@ -1055,7 +1089,7 @@ Required environment variables:
 					auth: auth && auth.ok ? { apiKey: auth.apiKey, headers: auth.headers } : undefined,
 					onProgress: (message) => {
 						latestStatus = message;
-						ctx.ui.setStatus("ace-tool", progressStatus(message));
+						aceStatus.progress(message);
 						renderWaiting();
 					},
 					signal: ctx.signal,
@@ -1087,7 +1121,7 @@ Required environment variables:
 			} finally {
 				clearInterval(waitingTimer);
 				ctx.ui.setWidget("ace-enhance", undefined);
-				ctx.ui.setStatus("ace-tool", undefined);
+				aceStatus.clear();
 			}
 		},
 	});
@@ -1106,19 +1140,19 @@ Required environment variables:
 		if (issues.length > 0 || !config.autoIndexOnSessionStart) return;
 
 		void (async () => {
-			ctx.ui.setStatus("ace-tool", "ace: indexing");
+			const aceStatus = beginAceStatus(ctx, "ace: indexing");
 			try {
 				const result = await indexProject(
 					ctx.cwd,
 					config,
-					(message) => ctx.ui.setStatus("ace-tool", progressStatus(message)),
+					(message) => aceStatus.progress(message),
 					ctx.signal,
 				);
 				ctx.ui.notify(`ace-tool background index complete: ${result.stats.files} files · ${result.stats.totalBlobs} blobs · ${result.stats.newBlobs} new`, "info");
 			} catch (error) {
 				ctx.ui.notify(`ace-tool background index failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
 			} finally {
-				ctx.ui.setStatus("ace-tool", undefined);
+				aceStatus.clear();
 			}
 		})();
 	});
