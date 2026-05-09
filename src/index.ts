@@ -1,6 +1,6 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { SelectList, Text, wrapTextWithAnsi, type Component, type SelectItem, type SelectListTheme, type TUI } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import path from "node:path";
 import {
@@ -348,6 +348,11 @@ function parseScopeArg(args: string): AceToolConfigScope | undefined {
 	return undefined;
 }
 
+type ConfigTheme = {
+	fg: (color: "accent" | "muted" | "dim" | "warning", text: string) => string;
+	bold: (text: string) => string;
+};
+
 type ConfigUiContext = {
 	cwd: string;
 	hasUI: boolean;
@@ -362,6 +367,10 @@ type ConfigUiContext = {
 		confirm: (title: string, message: string) => Promise<boolean>;
 		notify: (message: string, level?: "info" | "warning" | "error") => void;
 		setStatus: (key: string, value: string | undefined) => void;
+		custom?: <T>(
+			factory: (tui: TUI, theme: ConfigTheme, keybindings: unknown, done: (result: T) => void) => Component | Promise<Component>,
+			options?: { overlay?: boolean },
+		) => Promise<T>;
 	};
 };
 
@@ -394,8 +403,6 @@ const ADVANCED_CONFIG_FIELDS: ConfigField[] = [
 	{ key: "allowHttp", env: "ACE_TOOL_ALLOW_HTTP", label: "允许 HTTP 地址", kind: "boolean", defaultValue: false, description: "是否允许明文 http:// API 地址。默认 false，会为了安全把 http:// 升级为 https://，与 ace-tool-rs 行为一致。" },
 	{ key: "autoIndexOnSessionStart", env: "ACE_TOOL_AUTO_INDEX_ON_SESSION_START", label: "会话启动自动索引", kind: "boolean", defaultValue: false, description: "设为 true 时，pi 会话启动后会在后台执行索引/上传。默认 false，用于避免无感远程上传。" },
 ];
-
-const CONFIG_FIELDS: ConfigField[] = [...BASIC_CONFIG_FIELDS, ...ADVANCED_CONFIG_FIELDS];
 
 function scopeName(scope: AceToolConfigScope): string {
 	return scope === "global" ? "全局" : "项目";
@@ -492,10 +499,6 @@ function configFieldDetails(field: ConfigField, config: StoredAceToolConfig): st
 	].join("\n");
 }
 
-async function confirmConfigFieldEdit(ctx: ConfigUiContext, field: ConfigField, config: StoredAceToolConfig): Promise<boolean> {
-	return ctx.ui.confirm(`配置 ${field.env}`, `${configFieldDetails(field, config)}\n\n现在编辑这个设置吗？`);
-}
-
 function formatStoredValue(field: ConfigField, config: StoredAceToolConfig): string {
 	const value = config[field.key];
 	if (value === undefined || value === "") {
@@ -510,37 +513,137 @@ function fieldChoice(field: ConfigField, config: StoredAceToolConfig): string {
 	return `${mark} ${field.env} (${field.label}) = ${formatStoredValue(field, config)}`;
 }
 
-function findFieldFromChoice(choice: string): ConfigField | undefined {
-	return CONFIG_FIELDS.find((field) => choice.includes(field.env));
+type ConfigSelectItem = {
+	value: string;
+	label: string;
+	description?: string;
+	details?: string;
+};
+
+function selectTheme(theme: ConfigTheme): SelectListTheme {
+	return {
+		selectedPrefix: (text) => theme.fg("accent", text),
+		selectedText: (text) => theme.fg("accent", text),
+		description: (text) => theme.fg("muted", text),
+		scrollInfo: (text) => theme.fg("dim", text),
+		noMatch: (text) => theme.fg("warning", text),
+	};
+}
+
+function compactDetails(value: string, maxLines = 9): string[] {
+	const lines = value.split(/\r?\n/).map((line) => line.trimEnd());
+	if (lines.length <= maxLines) return lines;
+	return [...lines.slice(0, maxLines - 1), "…"];
+}
+
+async function selectConfigItem(ctx: ConfigUiContext, title: string, items: ConfigSelectItem[], maxVisible = 8): Promise<string | undefined> {
+	if (!ctx.ui.custom) {
+		const labels = items.map((item) => item.label);
+		const choice = await ctx.ui.select(title, labels);
+		return items.find((item) => item.label === choice)?.value;
+	}
+
+	return ctx.ui.custom<string | undefined>((tui, theme, _keybindings, done) => {
+		const selectListItems: SelectItem[] = items.map((item) => ({ value: item.value, label: item.label, description: item.description }));
+		const selectList = new SelectList(selectListItems, Math.min(maxVisible, Math.max(1, selectListItems.length)), selectTheme(theme), {
+			minPrimaryColumnWidth: 28,
+			maxPrimaryColumnWidth: 72,
+		});
+		const detailByValue = new Map(items.map((item) => [item.value, item.details || item.description || ""]));
+		selectList.onSelect = (item) => done(item.value);
+		selectList.onCancel = () => done(undefined);
+		return {
+			render(width: number): string[] {
+				const selected = selectList.getSelectedItem();
+				const details = selected ? detailByValue.get(selected.value) ?? "" : "";
+				const detailLines = compactDetails(details)
+					.flatMap((line) => line ? wrapTextWithAnsi(line, Math.max(20, width - 4)) : [""])
+					.map((line) => `  ${theme.fg("muted", line)}`);
+				return [
+					theme.fg("accent", theme.bold(title)),
+					...(detailLines.length > 0 ? ["", ...detailLines] : []),
+					"",
+					...selectList.render(width),
+					"",
+					theme.fg("dim", "↑↓ 切换 · Enter 选择/编辑 · Esc 返回"),
+				];
+			},
+			invalidate() {
+				selectList.invalidate();
+			},
+			handleInput(data: string) {
+				selectList.handleInput(data);
+				tui.requestRender();
+			},
+		};
+	});
 }
 
 async function chooseScope(ctx: ConfigUiContext, args: string): Promise<AceToolConfigScope | undefined> {
 	const fromArgs = parseScopeArg(args);
 	if (fromArgs) return fromArgs;
-	const choice = await ctx.ui.select("ace-tool 配置：选择要编辑的位置", [
-		"项目配置 (.pi/ace-tool.json)",
-		"全局配置 (~/.pi/agent/ace-tool.json)",
-		"清除配置",
-		"退出",
+	const choice = await selectConfigItem(ctx, "ace-tool 配置：选择要编辑的位置", [
+		{
+			value: "global",
+			label: "全局配置 (~/.pi/agent/ace-tool.json)",
+			description: "默认作用于所有项目；可被项目配置和环境变量覆盖。",
+			details: [
+				"编辑全局配置：~/.pi/agent/ace-tool.json",
+				"适合保存通用 API 地址、Token、提示词增强偏好等跨项目配置。",
+				"优先级：环境变量 > 项目配置 > 全局配置 > 默认值。",
+			].join("\n"),
+		},
+		{
+			value: "project",
+			label: "项目配置 (.pi/ace-tool.json)",
+			description: "只作用于当前项目；优先级高于全局配置。",
+			details: [
+				"编辑项目配置：.pi/ace-tool.json",
+				"适合保存当前仓库专用设置，例如独立 API 地址、索引参数或增强策略。",
+				"注意：.pi/ 默认会被忽略，避免把 Token 提交到仓库。",
+			].join("\n"),
+		},
+		{
+			value: "clear",
+			label: "清除配置",
+			description: "删除项目或全局配置文件。",
+			details: "选择后会再询问要清除项目配置还是全局配置，并在删除前二次确认。",
+		},
+		{
+			value: "exit",
+			label: "退出",
+			description: "不修改任何配置。",
+			details: "关闭配置向导。",
+		},
 	]);
-	if (!choice || choice === "退出") return undefined;
-	if (choice.startsWith("清除")) {
+	if (!choice || choice === "exit") return undefined;
+	if (choice === "clear") {
 		await clearConfigFlow(ctx, args);
 		return undefined;
 	}
-	return choice.startsWith("全局") ? "global" : "project";
+	return choice === "global" ? "global" : "project";
 }
 
 async function clearConfigFlow(ctx: ConfigUiContext, args: string): Promise<void> {
 	let scope = parseScopeArg(args);
 	if (!scope) {
-		const choice = await ctx.ui.select("要清除哪一份 ace-tool 配置？", [
-			"项目配置 (.pi/ace-tool.json)",
-			"全局配置 (~/.pi/agent/ace-tool.json)",
-			"取消",
+		const choice = await selectConfigItem(ctx, "要清除哪一份 ace-tool 配置？", [
+			{
+				value: "global",
+				label: "全局配置 (~/.pi/agent/ace-tool.json)",
+				description: "删除全局配置文件。",
+				details: `将删除：${getConfigFilePath("global", ctx.cwd)}\n删除后会退回到项目配置、环境变量或默认值。`,
+			},
+			{
+				value: "project",
+				label: "项目配置 (.pi/ace-tool.json)",
+				description: "删除当前项目配置文件。",
+				details: `将删除：${getConfigFilePath("project", ctx.cwd)}\n删除后当前项目会使用全局配置、环境变量或默认值。`,
+			},
+			{ value: "cancel", label: "取消", description: "不删除任何配置。", details: "返回上一级菜单。" },
 		]);
-		if (!choice || choice === "取消") return;
-		scope = choice.startsWith("全局") ? "global" : "project";
+		if (!choice || choice === "cancel") return;
+		scope = choice === "global" ? "global" : "project";
 	}
 	const ok = await ctx.ui.confirm("清除 ace-tool 配置？", `删除 ${getConfigFilePath(scope, ctx.cwd)}？`);
 	if (!ok) return;
@@ -595,14 +698,14 @@ async function editNumberField(ctx: ConfigUiContext, scope: AceToolConfigScope, 
 }
 
 async function editBooleanField(ctx: ConfigUiContext, scope: AceToolConfigScope, field: ConfigField, config: StoredAceToolConfig): Promise<boolean> {
-	const choice = await ctx.ui.select(`设置 ${field.env}（${field.label}）`, [
-		"false（推荐）",
-		"true",
-		"清除 / 使用默认值",
-		"取消",
+	const choice = await selectConfigItem(ctx, `设置 ${field.env}（${field.label}）`, [
+		{ value: "false", label: "false（推荐）", description: "关闭此开关。", details: `${field.description}\n\n将 ${field.env} 保存为 false。` },
+		{ value: "true", label: "true", description: "开启此开关。", details: `${field.description}\n\n将 ${field.env} 保存为 true。` },
+		{ value: "clear", label: "清除 / 使用默认值", description: "删除配置文件字段。", details: `删除 ${String(field.key)} 字段；之后使用环境变量、上级配置或默认值。` },
+		{ value: "cancel", label: "取消", description: "不修改此设置。", details: "返回上一级菜单。" },
 	]);
-	if (!choice || choice === "取消") return false;
-	if (choice.startsWith("清除")) {
+	if (!choice || choice === "cancel") return false;
+	if (choice === "clear") {
 		delete config[field.key];
 	} else {
 		(config as Record<string, unknown>)[field.key] = choice === "true";
@@ -663,66 +766,100 @@ async function configurePromptEnhancer(ctx: ConfigUiContext, scope: AceToolConfi
 		const mode = stored.promptEnhancerMode ?? "official";
 		const model = stored.promptEnhancerModel || "not set";
 		const includeContext = stored.promptEnhancerIncludeSearchContext ?? false;
-		const choice = await ctx.ui.select(`${scopeName(scope)}提示词增强配置`, [
-			`增强模式 = ${mode}`,
-			`Pi 模型 = ${model}`,
-			`注入代码库上下文 = ${includeContext}`,
-			"返回",
+		const choice = await selectConfigItem(ctx, `${scopeName(scope)}提示词增强配置`, [
+			{
+				value: "mode",
+				label: `增强模式 = ${mode}`,
+				description: "选择 /ace-enhance 使用官方接口还是 pi 模型。",
+				details: PROMPT_ENHANCER_MODE_DETAILS,
+			},
+			{
+				value: "model",
+				label: `Pi 模型 = ${model}`,
+				description: "pi-model 模式下使用的模型；未设置时使用当前会话模型。",
+				details: PROMPT_ENHANCER_MODEL_DETAILS,
+			},
+			{
+				value: "context",
+				label: `注入代码库上下文 = ${includeContext}`,
+				description: "增强前是否先检索并注入 search_context。",
+				details: PROMPT_ENHANCER_CONTEXT_DETAILS,
+			},
+			{ value: "back", label: "返回", description: "回到上一级配置菜单。", details: "返回上一级菜单。" },
 		]);
-		if (!choice || choice === "返回") return;
+		if (!choice || choice === "back") return;
 
-		if (choice.startsWith("增强模式")) {
-			const ok = await ctx.ui.confirm("提示词增强模式", `${PROMPT_ENHANCER_MODE_DETAILS}\n\n现在修改这个设置吗？`);
-			if (!ok) continue;
-			const next = await ctx.ui.select("提示词增强模式", [
-				"official（Augment /prompt-enhancer）",
-				"pi-model（使用已配置的 pi 模型）",
-				"清除 / 使用默认值",
-				"取消",
+		if (choice === "mode") {
+			const next = await selectConfigItem(ctx, "提示词增强模式", [
+				{
+					value: "official",
+					label: "official（Augment /prompt-enhancer）",
+					description: "使用 Augment 兼容官方增强接口。",
+					details: "调用配置的 ACE_TOOL_BASE_URL 下的 /prompt-enhancer。需要 ACE_TOOL_BASE_URL 和 ACE_TOOL_TOKEN。",
+				},
+				{
+					value: "pi-model",
+					label: "pi-model（使用已配置的 pi 模型）",
+					description: "复用 pi 中已配置的模型和鉴权。",
+					details: "调用 pi 原生模型注册表中的文本模型，不在 ace-tool 扩展里单独维护第三方 API Key。",
+				},
+				{ value: "clear", label: "清除 / 使用默认值", description: "删除配置文件字段，回到默认 official。", details: "清除 promptEnhancerMode 字段；默认值是 official。" },
+				{ value: "cancel", label: "取消", description: "不修改增强模式。", details: "返回提示词增强配置菜单。" },
 			]);
-			if (!next || next === "取消") continue;
+			if (!next || next === "cancel") continue;
 			const config = { ...stored };
-			if (next.startsWith("清除")) delete config.promptEnhancerMode;
-			else config.promptEnhancerMode = next.startsWith("pi-model") ? "pi-model" : "official";
+			if (next === "clear") delete config.promptEnhancerMode;
+			else config.promptEnhancerMode = next === "pi-model" ? "pi-model" : "official";
 			writeStoredConfig(scope, ctx.cwd, config);
 			ctx.ui.notify(`已保存提示词增强模式到${scopeName(scope)}配置。`, "info");
 			continue;
 		}
 
-		if (choice.startsWith("Pi 模型")) {
-			const ok = await ctx.ui.confirm("提示词增强 pi 模型", `${PROMPT_ENHANCER_MODEL_DETAILS}\n\n现在修改这个设置吗？`);
-			if (!ok) continue;
+		if (choice === "model") {
 			const available = ctx.modelRegistry?.getAvailable?.().filter((item) => item.input.includes("text")) ?? [];
 			if (available.length === 0) {
 				ctx.ui.notify("没有找到已配置的 pi 文本模型。请先在 pi 中配置或登录模型，然后再到这里选择。", "warning");
 				continue;
 			}
-			const selected = await ctx.ui.select("选择提示词增强使用的 pi 模型", [
-				...available.slice(0, 80).map((item) => `${modelKey(item)} (${item.name})`),
-				"清除 / 使用当前会话模型",
-				"取消",
+			const selected = await selectConfigItem(ctx, "选择提示词增强使用的 pi 模型", [
+				...available.slice(0, 80).map((item) => ({
+					value: modelKey(item),
+					label: `${modelKey(item)} (${item.name})`,
+					description: item.provider,
+					details: `模型：${modelKey(item)}\n名称：${item.name}\nProvider：${item.provider}\n输入能力：${item.input.join(", ")}`,
+				})),
+				{ value: "clear", label: "清除 / 使用当前会话模型", description: "删除模型配置。", details: "清除 promptEnhancerModel 字段；pi-model 模式会使用当前会话模型。" },
+				{ value: "cancel", label: "取消", description: "不修改模型。", details: "返回提示词增强配置菜单。" },
 			]);
-			if (!selected || selected === "取消") continue;
+			if (!selected || selected === "cancel") continue;
 			const config = { ...stored };
-			if (selected.startsWith("清除")) delete config.promptEnhancerModel;
-			else config.promptEnhancerModel = selected.split(" ")[0];
+			if (selected === "clear") delete config.promptEnhancerModel;
+			else config.promptEnhancerModel = selected;
 			writeStoredConfig(scope, ctx.cwd, config);
 			ctx.ui.notify(`已保存提示词增强 pi 模型到${scopeName(scope)}配置。`, "info");
 			continue;
 		}
 
-		if (choice.startsWith("注入")) {
-			const ok = await ctx.ui.confirm("提示词增强代码库上下文注入", `${PROMPT_ENHANCER_CONTEXT_DETAILS}\n\n现在修改这个设置吗？`);
-			if (!ok) continue;
-			const next = await ctx.ui.select("提示词增强前是否注入 search_context？", [
-				"false（推荐）",
-				"true",
-				"清除 / 使用默认值",
-				"取消",
+		if (choice === "context") {
+			const next = await selectConfigItem(ctx, "提示词增强前是否注入 search_context？", [
+				{
+					value: "false",
+					label: "false（推荐）",
+					description: "默认不额外检索代码库上下文。",
+					details: "推荐默认关闭，避免 /ace-enhance 触发额外扫描、索引、上传和远程检索。需要时可用 /ace-enhance --context 单次开启。",
+				},
+				{
+					value: "true",
+					label: "true",
+					description: "增强前自动注入 search_context。",
+					details: "适合大型重构、需求澄清、方案设计等需要代码库语义背景的提示词；可能增加延迟并触发远程上传变更块。",
+				},
+				{ value: "clear", label: "清除 / 使用默认值", description: "删除配置文件字段，回到默认 false。", details: "清除 promptEnhancerIncludeSearchContext 字段；默认值是 false。" },
+				{ value: "cancel", label: "取消", description: "不修改上下文注入设置。", details: "返回提示词增强配置菜单。" },
 			]);
-			if (!next || next === "取消") continue;
+			if (!next || next === "cancel") continue;
 			const config = { ...stored };
-			if (next.startsWith("清除")) delete config.promptEnhancerIncludeSearchContext;
+			if (next === "clear") delete config.promptEnhancerIncludeSearchContext;
 			else config.promptEnhancerIncludeSearchContext = next === "true";
 			writeStoredConfig(scope, ctx.cwd, config);
 			ctx.ui.notify(`已保存提示词增强上下文设置到${scopeName(scope)}配置。`, "info");
@@ -731,8 +868,6 @@ async function configurePromptEnhancer(ctx: ConfigUiContext, scope: AceToolConfi
 }
 
 async function editConfigField(ctx: ConfigUiContext, scope: AceToolConfigScope, field: ConfigField, config: StoredAceToolConfig): Promise<void> {
-	const shouldEdit = await confirmConfigFieldEdit(ctx, field, config);
-	if (!shouldEdit) return;
 	const changed = field.kind === "number"
 		? await editNumberField(ctx, scope, field, config)
 		: field.kind === "boolean"
@@ -746,12 +881,17 @@ async function editConfigField(ctx: ConfigUiContext, scope: AceToolConfigScope, 
 async function configureAdvancedMenu(ctx: ConfigUiContext, scope: AceToolConfigScope): Promise<void> {
 	while (true) {
 		const stored = readStoredConfig(scope, ctx.cwd);
-		const choice = await ctx.ui.select(`${scopeName(scope)} ace-tool 高级配置`, [
-			...ADVANCED_CONFIG_FIELDS.map((field) => fieldChoice(field, stored)),
-			"返回",
+		const choice = await selectConfigItem(ctx, `${scopeName(scope)} ace-tool 高级配置`, [
+			...ADVANCED_CONFIG_FIELDS.map((field) => ({
+				value: String(field.key),
+				label: fieldChoice(field, stored),
+				description: field.description,
+				details: configFieldDetails(field, stored),
+			})),
+			{ value: "back", label: "返回", description: "回到上一级配置菜单。", details: "返回上一级菜单，不修改高级设置。" },
 		]);
-		if (!choice || choice === "返回") return;
-		const field = findFieldFromChoice(choice);
+		if (!choice || choice === "back") return;
+		const field = ADVANCED_CONFIG_FIELDS.find((item) => item.key === choice);
 		if (field) {
 			await editConfigField(ctx, scope, field, { ...stored });
 		}
@@ -761,27 +901,37 @@ async function configureAdvancedMenu(ctx: ConfigUiContext, scope: AceToolConfigS
 async function configureScopeMenu(ctx: ConfigUiContext, scope: AceToolConfigScope): Promise<void> {
 	while (true) {
 		const stored = readStoredConfig(scope, ctx.cwd);
-		const choice = await ctx.ui.select(`${scopeName(scope)} ace-tool 配置`, [
-			...BASIC_CONFIG_FIELDS.map((field) => fieldChoice(field, stored)),
-			"提示词增强配置",
-			"高级设置",
-			"清除此配置",
-			"返回",
+		const choice = await selectConfigItem(ctx, `${scopeName(scope)} ace-tool 配置`, [
+			...BASIC_CONFIG_FIELDS.map((field) => ({
+				value: String(field.key),
+				label: fieldChoice(field, stored),
+				description: field.description,
+				details: configFieldDetails(field, stored),
+			})),
+			{
+				value: "prompt-enhancer",
+				label: "提示词增强配置",
+				description: "配置 /ace-enhance 的增强模式、pi 模型和上下文注入。",
+				details: "配置 /ace-enhance：选择 official 或 pi-model，指定 pi 模型，并决定是否在增强前注入 search_context 代码库上下文。",
+			},
+			{
+				value: "advanced",
+				label: "高级设置",
+				description: "索引粒度、超时、并发、缓存目录等高级参数。",
+				details: "高级设置包含索引分块、文件大小限制、上传批次、并发、HTTP 安全策略和会话启动自动索引。通常保持默认即可。",
+			},
+			{ value: "back", label: "返回", description: "回到配置位置选择。", details: "返回上一级菜单。" },
 		]);
-		if (!choice || choice === "返回") return;
-		if (choice === "提示词增强配置") {
+		if (!choice || choice === "back") return;
+		if (choice === "prompt-enhancer") {
 			await configurePromptEnhancer(ctx, scope);
 			continue;
 		}
-		if (choice === "高级设置") {
+		if (choice === "advanced") {
 			await configureAdvancedMenu(ctx, scope);
 			continue;
 		}
-		if (choice === "清除此配置") {
-			await clearConfigFlow(ctx, scope);
-			return;
-		}
-		const field = findFieldFromChoice(choice);
+		const field = BASIC_CONFIG_FIELDS.find((item) => item.key === choice);
 		if (field) {
 			await editConfigField(ctx, scope, field, { ...stored });
 		}

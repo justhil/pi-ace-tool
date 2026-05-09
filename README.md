@@ -35,7 +35,7 @@
 
 ### pi 原生体验
 
-- `/ace-config` 中文交互式配置菜单
+- `/ace-config` 中文交互式配置菜单：默认优先显示全局配置，菜单项说明会随光标切换显示
 - `/ace-status` 直观状态面板
 - `/ace-init` 初始化推荐 `.aceignore` / `.gitignore`
 - `/ace-index` 手动预索引
