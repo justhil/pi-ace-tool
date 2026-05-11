@@ -228,8 +228,9 @@ export ACE_TOOL_TOKEN="your-token"
 
 建议：
 
-- 不知道代码在哪时，优先使用 `search_context`
-- 已知标识符精确查找、列出所有引用、读取具体文件时，继续使用 pi 内置 `grep` / `read` / `find`
+- 当相关文件、实现流程、架构关系、行为或测试未知时，优先使用 `search_context` 做语义发现
+- 需求是自然语言描述、还没定位到项目实现细节时，先用 `search_context` 获取候选文件和上下文，再读取文件验证
+- 已知标识符精确查找、全文引用枚举、目录列表、读取具体文件或实际修改文件时，继续使用 pi 内置 `bash` / `grep` / `read` / `find` / `edit` / `write`
 
 ---
 
