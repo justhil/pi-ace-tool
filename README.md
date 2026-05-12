@@ -286,6 +286,9 @@ rm -rf .tmp-build
 ```
 
 ---
+## 参考与感谢
+[linux.do](https://linux.do/)
+[参考原帖](https://linux.do/t/topic/1369814)
 
 ## License
 
