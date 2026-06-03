@@ -22,12 +22,14 @@ export function calculateBlobName(path: string, content: string): string {
 	return hash.digest("hex");
 }
 
-export function calculateConfigHash(maxLinesPerBlob: number): string {
+export function calculateConfigHash(maxLinesPerBlob: number, apiIdentity = "compat:unconfigured"): string {
 	const hash = createHash("sha256");
-	hash.update("v1:");
+	hash.update("v2:");
 	const buffer = Buffer.allocUnsafe(8);
 	buffer.writeBigUInt64LE(BigInt(maxLinesPerBlob));
 	hash.update(buffer);
+	hash.update("\0");
+	hash.update(apiIdentity);
 	return hash.digest("hex").slice(0, 16);
 }
 

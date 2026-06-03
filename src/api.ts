@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { AceToolConfig } from "./config.js";
-import type { BlobChunk } from "./chunker.js";
+import { getAugmentSession } from "./augment-auth.js";
+import { calculateBlobName, type BlobChunk } from "./chunker.js";
 import { AdaptiveUploadStrategy, type UploadErrorType } from "./adaptive.js";
 
 export const USER_AGENT = "augment.cli/0.17.0";
@@ -22,6 +23,14 @@ interface ChatMessage {
 
 interface PromptEnhancerResponse {
 	text?: string | null;
+}
+
+type AceEndpointSource = "compat" | "official-oauth";
+
+interface ResolvedAceEndpoint {
+	baseUrl: string;
+	token: string;
+	source: AceEndpointSource;
 }
 
 interface UploadBatchResult {
@@ -82,13 +91,37 @@ function makeTimeoutSignal(timeoutMs: number, parent?: AbortSignal): { signal: A
 	};
 }
 
-function headers(config: AceToolConfig, requestId: string): Record<string, string> {
+export function getAceApiIdentity(config: AceToolConfig): string {
+	const session = getAugmentSession(config.augmentSessionPath);
+	if (config.apiMode === "official-oauth") return session ? `official-oauth:${session.tenantURL}` : "official-oauth:unconfigured";
+	if (config.apiMode === "auto" && session) return `official-oauth:${session.tenantURL}`;
+	if (config.baseUrl) return `compat:${config.baseUrl}`;
+	return `${config.apiMode}:unconfigured`;
+}
+
+function resolveAceEndpoint(config: AceToolConfig): ResolvedAceEndpoint {
+	const session = getAugmentSession(config.augmentSessionPath);
+	if (config.apiMode === "official-oauth") {
+		if (!session) throw new Error("Augment OAuth session not found. Run /ace-login or set AUGMENT_SESSION_AUTH.");
+		return { baseUrl: session.tenantURL, token: session.accessToken, source: "official-oauth" };
+	}
+	if (config.apiMode === "auto" && session) {
+		return { baseUrl: session.tenantURL, token: session.accessToken, source: "official-oauth" };
+	}
+	if (config.baseUrl && config.token) {
+		return { baseUrl: config.baseUrl, token: config.token, source: "compat" };
+	}
+	if (config.apiMode === "auto") throw new Error("auto API mode requires /ace-login or ACE_TOOL_BASE_URL + ACE_TOOL_TOKEN.");
+	throw new Error("ACE_TOOL_BASE_URL and ACE_TOOL_TOKEN are required in compat API mode.");
+}
+
+function headers(endpoint: ResolvedAceEndpoint, requestId: string): Record<string, string> {
 	return {
 		"Content-Type": "application/json",
 		"User-Agent": USER_AGENT,
 		"x-request-id": requestId,
 		"x-request-session-id": SESSION_ID,
-		Authorization: `Bearer ${config.token}`,
+		Authorization: `Bearer ${endpoint.token}`,
 	};
 }
 
@@ -148,8 +181,13 @@ export function replaceToolNames(text: string): string {
 }
 
 async function uploadBatch(config: AceToolConfig, blobs: BlobChunk[], timeoutMs: number, signal?: AbortSignal): Promise<UploadBatchResult> {
-	const url = `${config.baseUrl}/batch-upload`;
-	const body = JSON.stringify({ blobs });
+	const endpoint = resolveAceEndpoint(config);
+	const url = `${endpoint.baseUrl}/batch-upload`;
+	const body = JSON.stringify({
+		blobs: endpoint.source === "official-oauth"
+			? blobs.map((blob) => ({ blob_name: calculateBlobName(blob.path, blob.content), path: blob.path, content: blob.content }))
+			: blobs,
+	});
 	const maxRetries = 3;
 	let lastError = "Unknown error";
 	let lastStatus: number | undefined;
@@ -163,7 +201,7 @@ async function uploadBatch(config: AceToolConfig, blobs: BlobChunk[], timeoutMs:
 		try {
 			const response = await fetch(url, {
 				method: "POST",
-				headers: headers(config, requestId),
+				headers: headers(endpoint, requestId),
 				body,
 				signal: timeout.signal,
 			});
@@ -326,8 +364,35 @@ export async function uploadBlobs(config: AceToolConfig, blobs: BlobChunk[], bat
 	};
 }
 
+function parsePromptEnhancerResponse(text: string): string | undefined {
+	const trimmed = text.trim();
+	if (!trimmed) return undefined;
+	try {
+		const parsed = JSON.parse(trimmed) as PromptEnhancerResponse;
+		if (typeof parsed.text === "string" && parsed.text.trim()) return parsed.text.trim();
+	} catch {
+		// Official Augment can return newline-delimited JSON stream chunks.
+	}
+
+	let combined = "";
+	for (const line of trimmed.split(/\r?\n/)) {
+		const value = line.trim();
+		if (!value) continue;
+		try {
+			const parsed = JSON.parse(value) as PromptEnhancerResponse;
+			const chunk = typeof parsed.text === "string" ? parsed.text : "";
+			if (!chunk) continue;
+			combined = chunk.startsWith(combined) ? chunk : `${combined}${chunk}`;
+		} catch {
+			continue;
+		}
+	}
+	return combined.trim() || undefined;
+}
+
 export async function enhancePromptOfficial(config: AceToolConfig, prompt: string, conversationHistory = "", signal?: AbortSignal): Promise<string> {
-	const url = `${config.baseUrl}/prompt-enhancer`;
+	const endpoint = resolveAceEndpoint(config);
+	const url = `${endpoint.baseUrl}/prompt-enhancer`;
 	const requestId = randomUUID();
 	const body = JSON.stringify({
 		nodes: [
@@ -347,7 +412,7 @@ export async function enhancePromptOfficial(config: AceToolConfig, prompt: strin
 	try {
 		const response = await fetch(url, {
 			method: "POST",
-			headers: headers(config, requestId),
+			headers: headers(endpoint, requestId),
 			body,
 			signal: timeout.signal,
 		});
@@ -356,8 +421,7 @@ export async function enhancePromptOfficial(config: AceToolConfig, prompt: strin
 		if (response.status === 403) throw new Error("Prompt enhancer access denied, token may be disabled");
 		if (!response.ok) throw new Error(`Prompt enhancer failed: HTTP ${response.status}${text ? ` - ${text}` : ""}`);
 
-		const parsed = JSON.parse(text) as PromptEnhancerResponse;
-		const enhanced = parsed.text?.trim();
+		const enhanced = parsePromptEnhancerResponse(text);
 		if (!enhanced) throw new Error("Prompt enhancer API returned empty result");
 		return replaceToolNames(extractEnhancedPrompt(enhanced) ?? enhanced);
 	} finally {
@@ -366,7 +430,8 @@ export async function enhancePromptOfficial(config: AceToolConfig, prompt: strin
 }
 
 export async function searchCodebase(config: AceToolConfig, query: string, blobNames: string[], signal?: AbortSignal): Promise<string> {
-	const url = `${config.baseUrl}/agents/codebase-retrieval`;
+	const endpoint = resolveAceEndpoint(config);
+	const url = `${endpoint.baseUrl}/agents/codebase-retrieval`;
 	const requestId = randomUUID();
 	const body = JSON.stringify({
 		information_request: query,
@@ -385,7 +450,7 @@ export async function searchCodebase(config: AceToolConfig, query: string, blobN
 	try {
 		const response = await fetch(url, {
 			method: "POST",
-			headers: headers(config, requestId),
+			headers: headers(endpoint, requestId),
 			body,
 			signal: timeout.signal,
 		});

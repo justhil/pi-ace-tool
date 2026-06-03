@@ -11,12 +11,22 @@ import {
 	type StoredAceToolConfig,
 	validateConfig,
 	writeStoredConfig,
+	type AceApiMode,
 } from "./config.js";
+import {
+	completeAugmentOAuthFlow,
+	createAugmentOAuthFlow,
+	getDefaultAugmentSessionPath,
+	openBrowser,
+	readAugmentSessionSource,
+	removeAugmentSession,
+} from "./augment-auth.js";
 import { indexProject, runSearchContext } from "./search-context.js";
 import { initAceProject } from "./init.js";
 import { enhancePrompt, stripEnhanceMarkers } from "./prompt-enhancer.js";
 import { clearIndex, getIndexFilePath, loadIndex } from "./cache.js";
 import { calculateConfigHash } from "./chunker.js";
+import { getAceApiIdentity } from "./api.js";
 import { normalizeProjectPath } from "./path-normalizer.js";
 
 const SEARCH_CONTEXT_PARAMS = Type.Object({
@@ -70,7 +80,8 @@ function configSummary(cwd: string): string {
 	}
 	return [
 		"ace-tool configured",
-		`baseUrl: ${config.baseUrl}`,
+		`apiMode: ${config.apiMode}`,
+		`baseUrl: ${config.baseUrl || "not set"}`,
 		`token: ${maskSecret(config.token)}`,
 		`maxLinesPerBlob: ${config.maxLinesPerBlob}`,
 		`retrievalTimeout: ${config.retrievalTimeoutMs / 1000}s`,
@@ -92,8 +103,11 @@ function configScopeSummary(cwd: string): string {
 }
 
 const CONFIG_ENV_NAMES = [
+	"ACE_TOOL_API_MODE",
 	"ACE_TOOL_BASE_URL",
 	"ACE_TOOL_TOKEN",
+	"ACE_TOOL_AUGMENT_SESSION_PATH",
+	"ACE_TOOL_AUGMENT_AUTH_URL",
 	"ACE_TOOL_MAX_LINES_PER_BLOB",
 	"ACE_TOOL_RETRIEVAL_TIMEOUT_SECS",
 	"ACE_TOOL_UPLOAD_TIMEOUT_SECS",
@@ -212,6 +226,7 @@ function buildStatusPanel(options: {
 	const globalKeys = Object.keys(globalConfig).length;
 	const configured = issues.length === 0;
 	const indexed = options.fileCount > 0 && options.blobCount > 0;
+	const augmentSession = readAugmentSessionSource(config.augmentSessionPath);
 
 	const text = [
 		"ace-tool status",
@@ -223,8 +238,11 @@ function buildStatusPanel(options: {
 		]),
 		"",
 		section("config", [
+			kv("apiMode", config.apiMode),
 			kv("baseUrl", config.baseUrl || "not set"),
 			kv("token", maskSecret(config.token)),
+			kv("augment", augmentSession.session ? `logged in (${augmentSession.source})` : "not logged in"),
+			kv("tenant", augmentSession.session?.tenantURL || "not set"),
 			kv("project", projectKeys ? `${projectKeys} setting(s)` : "not set"),
 			kv("global", globalKeys ? `${globalKeys} setting(s)` : "not set"),
 			kv("env", envOverrideSummary()),
@@ -240,6 +258,7 @@ function buildStatusPanel(options: {
 			kv("chunkLines", config.maxLinesPerBlob),
 			kv("upload", `${config.uploadConcurrency ?? "auto"} concurrency · ${Math.round(config.uploadTimeoutMs / 1000)}s timeout`),
 			kv("retrieval", `${Math.round(config.retrievalTimeoutMs / 1000)}s timeout`),
+			kv("apiIdentity", compactPath(getAceApiIdentity(config), 72)),
 			kv("hash", options.configHash),
 		]),
 		"",
@@ -387,8 +406,8 @@ type ConfigField = {
 };
 
 const BASIC_CONFIG_FIELDS: ConfigField[] = [
-	{ key: "baseUrl", env: "ACE_TOOL_BASE_URL", label: "API 基础地址", kind: "string", required: true, description: "Augment 兼容 API 的基础地址，用于 search_context、索引上传、官方提示词增强，以及代码库上下文注入。" },
-	{ key: "token", env: "ACE_TOOL_TOKEN", label: "API Token", kind: "secret", required: true, description: "Augment 兼容 API 的 Bearer Token。配置文件会以 0600 权限写入，但环境变量仍然拥有最高优先级。" },
+	{ key: "baseUrl", env: "ACE_TOOL_BASE_URL", label: "兼容 API 基础地址", kind: "string", description: "compat 或 auto 回退模式下使用的 Augment 兼容 API 基础地址。official-oauth 模式会改用 Augment OAuth session 中的 tenantURL。" },
+	{ key: "token", env: "ACE_TOOL_TOKEN", label: "兼容 API Token", kind: "secret", description: "compat 或 auto 回退模式下使用的 Bearer Token。official-oauth 模式不使用该字段。配置文件会以 0600 权限写入，但环境变量仍然拥有最高优先级。" },
 ];
 
 const ADVANCED_CONFIG_FIELDS: ConfigField[] = [
@@ -400,6 +419,8 @@ const ADVANCED_CONFIG_FIELDS: ConfigField[] = [
 	{ key: "maxBatchBytes", env: "ACE_TOOL_MAX_BATCH_BYTES", label: "单批上传最大字节数", kind: "number", defaultValue: 1024 * 1024, description: "每个上传批次的 JSON 载荷最大大小。如果网关拒绝较大的请求，可以调低该值。" },
 	{ key: "indexDirName", env: "ACE_TOOL_INDEX_DIR", label: "索引目录", kind: "string", defaultValue: ".ace-tool", description: "本地 ace-tool 缓存目录。扩展会尽力把该目录加入 .gitignore。" },
 	{ key: "indexFileName", env: "ACE_TOOL_INDEX_FILE", label: "索引文件名", kind: "string", defaultValue: "index.json", description: "索引目录内的本地索引缓存文件名。只有需要多个独立缓存时才建议修改。" },
+	{ key: "augmentSessionPath", env: "ACE_TOOL_AUGMENT_SESSION_PATH", label: "Augment Session 路径", kind: "string", defaultValue: getDefaultAugmentSessionPath(), description: "official-oauth / auto 模式读取和 /ace-login 写入的 Augment OAuth session 文件。默认复用 auggie 的 ~/.augment/session.json。" },
+	{ key: "augmentAuthUrl", env: "ACE_TOOL_AUGMENT_AUTH_URL", label: "Augment OAuth 地址", kind: "string", defaultValue: "https://auth.augmentcode.com", description: "Augment OAuth 登录入口。通常保持官方默认值即可。" },
 	{ key: "allowHttp", env: "ACE_TOOL_ALLOW_HTTP", label: "允许 HTTP 地址", kind: "boolean", defaultValue: false, description: "是否允许明文 http:// API 地址。默认 false，会为了安全把 http:// 升级为 https://，与 ace-tool-rs 行为一致。" },
 	{ key: "autoIndexOnSessionStart", env: "ACE_TOOL_AUTO_INDEX_ON_SESSION_START", label: "会话启动自动索引", kind: "boolean", defaultValue: false, description: "设为 true 时，pi 会话启动后会在后台执行索引/上传。默认 false，用于避免无感远程上传。" },
 ];
@@ -411,6 +432,54 @@ function scopeName(scope: AceToolConfigScope): string {
 function updateConfigStatus(ctx: ConfigUiContext): void {
 	const config = loadConfig(ctx.cwd);
 	ctx.ui.setStatus("ace-tool", validateConfig(config).length > 0 ? "ace: unconfigured" : undefined);
+}
+
+function apiModeLabel(mode: AceApiMode | undefined): string {
+	return mode ?? "compat";
+}
+
+const API_MODE_DETAILS = [
+	"选择 search_context / /ace-index / official /ace-enhance 使用哪条 API 链路。",
+	"",
+	"compat：继续使用 ACE_TOOL_BASE_URL + ACE_TOOL_TOKEN 指向的 Augment 兼容中转。",
+	"official-oauth：读取 Augment OAuth session，直连 session.tenantURL；需要先 /ace-login 或设置 AUGMENT_SESSION_AUTH。",
+	"auto：优先 official-oauth；没有 session 时回退 compat。",
+	"",
+	"环境变量：ACE_TOOL_API_MODE",
+	"配置文件字段：apiMode",
+	"默认值：compat",
+].join("\n");
+
+async function configureApiMode(ctx: ConfigUiContext, scope: AceToolConfigScope): Promise<void> {
+	const stored = readStoredConfig(scope, ctx.cwd);
+	const choice = await selectConfigItem(ctx, "选择 ace-tool API 模式", [
+		{
+			value: "compat",
+			label: "compat（兼容中转）",
+			description: "使用 ACE_TOOL_BASE_URL + ACE_TOOL_TOKEN。",
+			details: "保持当前行为：search_context、索引上传和 official prompt enhancer 都走已配置的 Augment 兼容 API 中转。适合已有中转可用、或需要回退兼容时使用。",
+		},
+		{
+			value: "official-oauth",
+			label: "official-oauth（官方直连）",
+			description: "使用 Augment OAuth session 直连官方 tenant API。",
+			details: "优先推荐的新模式。需要先运行 /ace-login，或由 auggie login 生成 ~/.augment/session.json，也可设置 AUGMENT_SESSION_AUTH。不会使用 ACE_TOOL_BASE_URL / ACE_TOOL_TOKEN。",
+		},
+		{
+			value: "auto",
+			label: "auto（官方优先，兼容回退）",
+			description: "有官方 session 就直连官方；否则回退中转。",
+			details: "适合过渡期使用。存在 AUGMENT_SESSION_AUTH 或 session 文件时走 official-oauth；没有 session 时走 compat。",
+		},
+		{ value: "clear", label: "清除 / 使用默认值", description: "删除 apiMode 字段，回到默认 compat。", details: "清除 apiMode 字段；默认值为 compat。" },
+	]);
+	if (!choice) return;
+	const config = { ...stored };
+	if (choice === "clear") delete config.apiMode;
+	else config.apiMode = choice as AceApiMode;
+	writeStoredConfig(scope, ctx.cwd, config);
+	updateConfigStatus(ctx);
+	ctx.ui.notify(`已保存 API 模式到${scopeName(scope)}配置：${choice === "clear" ? "compat(default)" : choice}`, "info");
 }
 
 function progressStatus(message: string): string {
@@ -467,7 +536,7 @@ function buildAceSystemPrompt(cwd: string, options: Pick<BuildSystemPromptOption
 	const config = loadConfig(cwd);
 	const issues = validateConfig(config);
 	if (issues.length > 0) {
-		return "Ace search_context unavailable: do not call it until the user configures ace-tool with /ace-config.";
+		return "Ace search_context unavailable: do not call it until the user configures ace-tool with /ace-config or logs in with /ace-login.";
 	}
 
 	const selectedTools = new Set(options.selectedTools ?? []);
@@ -758,7 +827,7 @@ function parseModelKey(value: string): { provider: string; modelId: string } | u
 const PROMPT_ENHANCER_MODE_DETAILS = [
 	"选择 /ace-enhance 使用哪种方式改写提示词。",
 	"",
-	"official：调用 Augment 兼容的 /prompt-enhancer 官方接口。需要配置 ACE_TOOL_BASE_URL 和 ACE_TOOL_TOKEN。",
+	"official：调用当前 API 模式解析出的 Augment /prompt-enhancer。compat 用 ACE_TOOL_BASE_URL + ACE_TOOL_TOKEN；official-oauth 用 Augment OAuth session。",
 	"pi-model：调用 pi 中已经配置好的文本模型。会复用 pi 的鉴权、请求头、Provider、代理和自定义模型。",
 	"",
 	"环境变量：ACE_TOOL_PROMPT_ENHANCER_MODE",
@@ -823,8 +892,8 @@ async function configurePromptEnhancer(ctx: ConfigUiContext, scope: AceToolConfi
 				{
 					value: "official",
 					label: "official（Augment /prompt-enhancer）",
-					description: "使用 Augment 兼容官方增强接口。",
-					details: "调用配置的 ACE_TOOL_BASE_URL 下的 /prompt-enhancer。需要 ACE_TOOL_BASE_URL 和 ACE_TOOL_TOKEN。",
+					description: "使用当前 API 模式对应的 Augment 增强接口。",
+					details: "调用当前 API 模式解析出的 /prompt-enhancer。compat 使用 ACE_TOOL_BASE_URL + ACE_TOOL_TOKEN；official-oauth 使用 /ace-login 或 AUGMENT_SESSION_AUTH 的官方 tenant API。",
 				},
 				{
 					value: "pi-model",
@@ -931,6 +1000,12 @@ async function configureScopeMenu(ctx: ConfigUiContext, scope: AceToolConfigScop
 	while (true) {
 		const stored = readStoredConfig(scope, ctx.cwd);
 		const choice = await selectConfigItem(ctx, `${scopeName(scope)} ace-tool 配置`, [
+			{
+				value: "api-mode",
+				label: `API 模式 = ${apiModeLabel(stored.apiMode)}`,
+				description: "选择兼容中转、官方 OAuth 直连或自动回退。",
+				details: API_MODE_DETAILS,
+			},
 			...BASIC_CONFIG_FIELDS.map((field) => ({
 				value: String(field.key),
 				label: fieldChoice(field, stored),
@@ -952,6 +1027,10 @@ async function configureScopeMenu(ctx: ConfigUiContext, scope: AceToolConfigScop
 			{ value: "back", label: "返回", description: "回到配置位置选择。", details: "返回上一级菜单。" },
 		]);
 		if (!choice || choice === "back") return;
+		if (choice === "api-mode") {
+			await configureApiMode(ctx, scope);
+			continue;
+		}
 		if (choice === "prompt-enhancer") {
 			await configurePromptEnhancer(ctx, scope);
 			continue;
@@ -969,7 +1048,7 @@ async function configureScopeMenu(ctx: ConfigUiContext, scope: AceToolConfigScop
 
 async function runConfigWizard(args: string, ctx: ConfigUiContext): Promise<void> {
 	if (!ctx.hasUI) {
-		throw new Error("/ace-config 需要交互式 UI。非交互模式请通过环境变量设置 ACE_TOOL_BASE_URL 和 ACE_TOOL_TOKEN。");
+		throw new Error("/ace-config 需要交互式 UI。非交互模式请通过环境变量设置 ACE_TOOL_API_MODE、ACE_TOOL_BASE_URL / ACE_TOOL_TOKEN，或运行 /ace-login 生成 Augment session。");
 	}
 
 	const normalizedArgs = args.trim().toLowerCase();
@@ -1000,9 +1079,10 @@ Do NOT use search_context for exact identifier grep, exhaustive reference lists,
 
 The tool indexes the current project, uploads new or changed code chunks to the configured Augment API, then asks the codebase retrieval endpoint for relevant context. Treat results as navigation and project context; read returned files before making precise changes. Output is truncated to 50KB/2000 lines if necessary.
 
-Required environment variables:
-- ACE_TOOL_BASE_URL
-- ACE_TOOL_TOKEN`,
+Configuration:
+- compat mode requires ACE_TOOL_BASE_URL and ACE_TOOL_TOKEN.
+- official-oauth mode requires /ace-login, ~/.augment/session.json, or AUGMENT_SESSION_AUTH.
+- auto mode prefers official-oauth and falls back to compat.`,
 		promptSnippet: "Semantic codebase discovery for unknown files, flows, architecture, tests, and project-specific implementation context",
 		promptGuidelines: [
 			"Use search_context early when the task requires project-specific context and relevant files, flows, architecture, behavior, or tests are unknown.",
@@ -1130,7 +1210,7 @@ Required environment variables:
 		handler: async (args, ctx) => {
 			const config = loadConfig(ctx.cwd);
 			const projectRoot = normalizeProjectPath(args.trim(), ctx.cwd);
-			const configHash = calculateConfigHash(config.maxLinesPerBlob);
+			const configHash = calculateConfigHash(config.maxLinesPerBlob, getAceApiIdentity(config));
 			const index = await loadIndex(projectRoot, configHash, config.indexDirName, config.indexFileName);
 			const fileCount = Object.keys(index.entries).length;
 			const blobCount = Object.values(index.entries).reduce((sum, entry) => sum + entry.blobHashes.length, 0);
@@ -1144,6 +1224,79 @@ Required environment variables:
 				configHash,
 			});
 			ctx.ui.notify(panel.text, panel.level);
+		},
+	});
+
+	pi.registerCommand("ace-login", {
+		description: "Authenticate with Augment OAuth and save ~/.augment/session.json for official-oauth mode",
+		handler: async (_args, ctx) => {
+			const config = loadConfig(ctx.cwd);
+			const existing = readAugmentSessionSource(config.augmentSessionPath);
+			if (existing.session) {
+				const ok = await ctx.ui.confirm(
+					"重新登录 Augment？",
+					`当前已有 Augment session（${existing.source}）：\n${existing.session.tenantURL}\n\n继续会用新 session 覆盖文件登录状态。`,
+				);
+				if (!ok) return;
+			}
+
+			const flow = createAugmentOAuthFlow(config.augmentAuthUrl);
+			const opened = await openBrowser(flow.authorizeUrl);
+			ctx.ui.notify(
+				[
+					"Augment OAuth 登录已开始。",
+					opened ? "已尝试打开浏览器。" : "浏览器未能自动打开，请手动访问下面的 URL。",
+					"",
+					flow.authorizeUrl,
+					"",
+					"浏览器登录后会显示一段 JSON。复制完整 JSON，然后粘贴到下一步输入框。",
+				].join("\n"),
+				"info",
+			);
+
+			const pasted = await ctx.ui.input("粘贴 Augment OAuth JSON", "粘贴浏览器返回的完整 JSON，例如 {\"code\":...,\"state\":...,\"tenant_url\":...}");
+			if (!pasted?.trim()) {
+				ctx.ui.notify("Augment OAuth 登录已取消。", "info");
+				return;
+			}
+
+			const session = await completeAugmentOAuthFlow(flow, pasted, config.augmentSessionPath, ctx.signal);
+			ctx.ui.notify(
+				[
+					"Augment OAuth 登录成功。",
+					`tenant: ${session.tenantURL}`,
+					`session: ${config.augmentSessionPath || getDefaultAugmentSessionPath()}`,
+					"",
+					"可在 /ace-config → API 模式 切换到 official-oauth 或 auto。",
+				].join("\n"),
+				"info",
+			);
+			updateConfigStatus(ctx);
+		},
+	});
+
+	pi.registerCommand("ace-logout", {
+		description: "Remove local Augment OAuth session used by official-oauth mode",
+		handler: async (_args, ctx) => {
+			const config = loadConfig(ctx.cwd);
+			const source = readAugmentSessionSource(config.augmentSessionPath);
+			if (!source.session) {
+				ctx.ui.notify("当前没有可用的 Augment OAuth session。", "info");
+				return;
+			}
+			const ok = await ctx.ui.confirm("退出 Augment OAuth？", `清除当前 Augment session？\nsource: ${source.source}\nfile: ${source.path}\n\ntenant: ${source.session.tenantURL}`);
+			if (!ok) return;
+			if (source.source === "env") delete process.env.AUGMENT_SESSION_AUTH;
+			const removed = removeAugmentSession(config.augmentSessionPath);
+			ctx.ui.notify(
+				[
+					"已清除当前进程的 Augment session。",
+					`已删除本地 session 文件：${removed}`,
+					source.source === "env" ? "注意：无法修改父进程 shell 里的 AUGMENT_SESSION_AUTH；下次启动前请在 shell 中 unset。" : "",
+				].filter(Boolean).join("\n"),
+				"info",
+			);
+			updateConfigStatus(ctx);
 		},
 	});
 
@@ -1245,7 +1398,7 @@ Required environment variables:
 			const issues = validateConfig(config);
 			if ((config.promptEnhancerMode === "official" || includeSearchContext) && issues.length > 0) {
 				ctx.ui.setStatus("ace-tool", "ace: unconfigured");
-				ctx.ui.notify(`ace-tool configuration error:\n- ${issues.join("\n- ")}\n\nOfficial enhancement and context injection require /ace-config. Switch prompt enhancer mode to pi-model and disable context injection to enhance without ACE API config.`, "warning");
+				ctx.ui.notify(`ace-tool configuration error:\n- ${issues.join("\n- ")}\n\nOfficial enhancement and context injection require /ace-login or /ace-config. Switch prompt enhancer mode to pi-model and disable context injection to enhance without ACE API config.`, "warning");
 				return;
 			}
 			const aceStatus = beginAceStatus(ctx, includeSearchContext ? "ace: enhancing+context" : "ace: enhancing");

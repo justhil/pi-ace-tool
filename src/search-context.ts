@@ -5,7 +5,7 @@ import { getUploadStrategy } from "./config.js";
 import { processFileContent, calculateConfigHash, type BlobChunk } from "./chunker.js";
 import { collectFileCandidates, type FileCandidate } from "./scanner.js";
 import { emptyIndex, getAllBlobHashes, loadIndex, saveIndex, type FileEntry, type IndexData, type IndexStats } from "./cache.js";
-import { searchCodebase, uploadBlobs } from "./api.js";
+import { getAceApiIdentity, searchCodebase, uploadBlobs } from "./api.js";
 import { buildSearchResultHeader, extractResultPaths } from "./results.js";
 import { normalizeProjectPath } from "./path-normalizer.js";
 
@@ -172,7 +172,7 @@ async function processCandidates(candidates: FileCandidate[], oldIndex: IndexDat
 }
 
 export async function indexProject(projectRoot: string, config: AceToolConfig, onProgress?: (message: string) => void, signal?: AbortSignal): Promise<{ index: IndexData; stats: IndexStats; partial: boolean }> {
-	const configHash = calculateConfigHash(config.maxLinesPerBlob);
+	const configHash = calculateConfigHash(config.maxLinesPerBlob, getAceApiIdentity(config));
 	onProgress?.("Scanning project files...");
 	const candidates = await collectFileCandidates(projectRoot, { maxFileBytes: config.maxFileBytes });
 

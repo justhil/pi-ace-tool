@@ -6,8 +6,9 @@
 
 - 注册 pi 原生工具：`search_context`
 - 自动扫描、分块、索引当前项目
-- 只上传新增或变更代码块到 Augment 兼容 API
+- 只上传新增或变更代码块到 Augment 兼容 API 或官方 Augment OAuth tenant API
 - 通过远程语义检索返回相关代码上下文
+- 提供 `/ace-login` 官方 OAuth 登录，复用 `~/.augment/session.json`
 - 提供 `/ace-enhance` 显式提示词增强命令
 - 支持官方 Augment `/prompt-enhancer` 和 pi 已配置模型增强
 
@@ -38,7 +39,8 @@
 
 ### pi 原生体验
 
-- `/ace-config` 中文交互式配置菜单：默认优先显示全局配置，菜单项说明随光标切换显示并保持固定高度
+- `/ace-config` 中文交互式配置菜单：可切换 `compat` / `official-oauth` / `auto` API 模式，菜单项说明随光标切换显示并保持固定高度
+- `/ace-login` / `/ace-logout` 管理官方 Augment OAuth session
 - `/ace-status` 直观状态面板
 - `/ace-init` 初始化推荐 `.aceignore` / `.gitignore`
 - `/ace-index` 手动预索引
@@ -55,8 +57,9 @@
 支持两种模式：
 
 1. `official`
-   - 调用 Augment 兼容接口：`POST /prompt-enhancer`
-   - 需要 `ACE_TOOL_BASE_URL` 和 `ACE_TOOL_TOKEN`
+   - 调用当前 API 模式解析出的 `POST /prompt-enhancer`
+   - `compat` 模式使用 `ACE_TOOL_BASE_URL` + `ACE_TOOL_TOKEN`
+   - `official-oauth` 模式使用 `/ace-login`、`~/.augment/session.json` 或 `AUGMENT_SESSION_AUTH`
 
 2. `pi-model`
    - 使用 pi 中已经配置好的文本模型
@@ -126,14 +129,22 @@ pi -e .
 
 3. 配置 API：
 
+官方 OAuth 直连：
+
+```text
+/ace-login
+/ace-config
+```
+
+在 `/ace-config` 里把 `API 模式` 切到 `official-oauth` 或 `auto`。
+
+兼容中转模式：
+
 ```text
 /ace-config
 ```
 
-至少配置：
-
-- `ACE_TOOL_BASE_URL`
-- `ACE_TOOL_TOKEN`
+配置 `ACE_TOOL_BASE_URL` 和 `ACE_TOOL_TOKEN`，或设置同名环境变量。默认模式仍为 `compat`，保持旧行为不变。
 
 4. 查看状态：
 
@@ -178,19 +189,38 @@ pi -e .
 环境变量 > 项目配置 > 全局配置 > 默认值
 ```
 
+### API 模式
+
+| 模式 | 说明 |
+|---|---|
+| `compat` | 默认旧行为。使用 `ACE_TOOL_BASE_URL` + `ACE_TOOL_TOKEN` 调用 Augment 兼容中转。 |
+| `official-oauth` | 使用 Augment OAuth session 直连官方 tenant API。先运行 `/ace-login`，或复用 `auggie login` 生成的 `~/.augment/session.json`。 |
+| `auto` | 优先使用官方 OAuth session；没有 session 时回退 `compat`。 |
+
 ### 环境变量
 
 ```bash
+# 兼容中转
+export ACE_TOOL_API_MODE="compat"
 export ACE_TOOL_BASE_URL="https://your-augment-api.example.com"
 export ACE_TOOL_TOKEN="your-token"
+
+# 官方 OAuth 直连（可选，通常直接 /ace-login 即可）
+export ACE_TOOL_API_MODE="official-oauth"
+export AUGMENT_SESSION_AUTH='{"accessToken":"...","tenantURL":"https://xxx.augmentcode.com","scopes":["read","write"]}'
 ```
+
+`official-oauth` 默认读取 `~/.augment/session.json`，该格式与 Auggie CLI 一致；tenant URL 只接受官方 HTTPS tenant 域名。
 
 ### 配置表
 
 | 配置文件字段 | 环境变量 | 默认值 | 说明 |
 |---|---|---:|---|
-| `baseUrl` | `ACE_TOOL_BASE_URL` | 必填 | Augment 兼容 API Base URL |
-| `token` | `ACE_TOOL_TOKEN` | 必填 | API Token |
+| `apiMode` | `ACE_TOOL_API_MODE` | `compat` | `compat`、`official-oauth` 或 `auto` |
+| `baseUrl` | `ACE_TOOL_BASE_URL` | - | compat / auto 回退时使用的 Augment 兼容 API Base URL |
+| `token` | `ACE_TOOL_TOKEN` | - | compat / auto 回退时使用的 API Token |
+| `augmentSessionPath` | `ACE_TOOL_AUGMENT_SESSION_PATH` | `~/.augment/session.json` | official-oauth / auto 读取和 `/ace-login` 写入的 session 文件 |
+| `augmentAuthUrl` | `ACE_TOOL_AUGMENT_AUTH_URL` | `https://auth.augmentcode.com` | Augment OAuth 登录入口 |
 | `maxLinesPerBlob` | `ACE_TOOL_MAX_LINES_PER_BLOB` | `800` | 每个代码块最多行数 |
 | `retrievalTimeoutSecs` | `ACE_TOOL_RETRIEVAL_TIMEOUT_SECS` | `60` | 检索和官方提示词增强请求超时 |
 | `uploadTimeoutSecs` | `ACE_TOOL_UPLOAD_TIMEOUT_SECS` | `30` | 上传批次基础超时 |
@@ -242,6 +272,8 @@ export ACE_TOOL_TOKEN="your-token"
 | `/ace-config project` | 进入项目级 `.pi/ace-tool.json` 配置 |
 | `/ace-config global` | 进入全局 `~/.pi/agent/ace-tool.json` 配置 |
 | `/ace-config clear` | 删除项目级或全局配置 |
+| `/ace-login` | 使用 Augment OAuth 浏览器登录，保存 `~/.augment/session.json`，并更新当前进程 session |
+| `/ace-logout` | 清除当前进程 session 并删除本地 Augment OAuth session 文件 |
 | `/ace-status` | 显示状态面板：配置、配置来源、本地索引状态 |
 | `/ace-status <path>` | 显示指定项目路径的索引状态 |
 | `/ace-init` | 初始化推荐 `.aceignore` / `.gitignore` 安全忽略项 |

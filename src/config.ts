@@ -1,14 +1,20 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { getAugmentSession } from "./augment-auth.js";
 
 export type AceToolConfigScope = "project" | "global";
+
+export type AceApiMode = "compat" | "official-oauth" | "auto";
 
 export type AcePromptEnhancerMode = "official" | "pi-model";
 
 export interface StoredAceToolConfig {
+	apiMode?: AceApiMode;
 	baseUrl?: string;
 	token?: string;
+	augmentSessionPath?: string;
+	augmentAuthUrl?: string;
 	maxLinesPerBlob?: number;
 	retrievalTimeoutSecs?: number;
 	uploadTimeoutSecs?: number;
@@ -25,8 +31,11 @@ export interface StoredAceToolConfig {
 }
 
 export interface AceToolConfig {
+	apiMode: AceApiMode;
 	baseUrl: string;
 	token: string;
+	augmentSessionPath: string;
+	augmentAuthUrl: string;
 	maxLinesPerBlob: number;
 	retrievalTimeoutMs: number;
 	uploadTimeoutMs: number;
@@ -54,6 +63,15 @@ function maybePositiveInt(value: unknown): number | undefined {
 	return undefined;
 }
 
+function maybeApiMode(value: unknown): AceApiMode | undefined {
+	if (typeof value !== "string") return undefined;
+	const lower = value.trim().toLowerCase();
+	if (lower === "compat" || lower === "proxy" || lower === "relay") return "compat";
+	if (lower === "official-oauth" || lower === "official" || lower === "oauth" || lower === "augment") return "official-oauth";
+	if (lower === "auto") return "auto";
+	return undefined;
+}
+
 function maybeEnhancerMode(value: unknown): AcePromptEnhancerMode | undefined {
 	if (typeof value !== "string") return undefined;
 	const lower = value.trim().toLowerCase();
@@ -76,8 +94,11 @@ function normalizeStoredConfig(raw: unknown): StoredAceToolConfig {
 	if (!raw || typeof raw !== "object") return {};
 	const value = raw as Record<string, unknown>;
 	return cleanStoredConfig({
+		apiMode: maybeApiMode(value.apiMode) ?? maybeApiMode(value.ACE_TOOL_API_MODE),
 		baseUrl: maybeString(value.baseUrl) ?? maybeString(value.ACE_TOOL_BASE_URL),
 		token: maybeString(value.token) ?? maybeString(value.ACE_TOOL_TOKEN),
+		augmentSessionPath: maybeString(value.augmentSessionPath) ?? maybeString(value.ACE_TOOL_AUGMENT_SESSION_PATH),
+		augmentAuthUrl: maybeString(value.augmentAuthUrl) ?? maybeString(value.ACE_TOOL_AUGMENT_AUTH_URL),
 		maxLinesPerBlob: maybePositiveInt(value.maxLinesPerBlob) ?? maybePositiveInt(value.ACE_TOOL_MAX_LINES_PER_BLOB),
 		retrievalTimeoutSecs: maybePositiveInt(value.retrievalTimeoutSecs) ?? maybePositiveInt(value.ACE_TOOL_RETRIEVAL_TIMEOUT_SECS),
 		uploadTimeoutSecs: maybePositiveInt(value.uploadTimeoutSecs) ?? maybePositiveInt(value.ACE_TOOL_UPLOAD_TIMEOUT_SECS),
@@ -96,8 +117,11 @@ function normalizeStoredConfig(raw: unknown): StoredAceToolConfig {
 
 export function cleanStoredConfig(config: StoredAceToolConfig): StoredAceToolConfig {
 	const cleaned: StoredAceToolConfig = {};
+	if (config.apiMode) cleaned.apiMode = config.apiMode;
 	if (config.baseUrl) cleaned.baseUrl = config.baseUrl.trim();
 	if (config.token) cleaned.token = config.token.trim();
+	if (config.augmentSessionPath) cleaned.augmentSessionPath = config.augmentSessionPath.trim();
+	if (config.augmentAuthUrl) cleaned.augmentAuthUrl = config.augmentAuthUrl.trim();
 	if (config.maxLinesPerBlob && config.maxLinesPerBlob > 0) cleaned.maxLinesPerBlob = Math.trunc(config.maxLinesPerBlob);
 	if (config.retrievalTimeoutSecs && config.retrievalTimeoutSecs > 0) cleaned.retrievalTimeoutSecs = Math.trunc(config.retrievalTimeoutSecs);
 	if (config.uploadTimeoutSecs && config.uploadTimeoutSecs > 0) cleaned.uploadTimeoutSecs = Math.trunc(config.uploadTimeoutSecs);
@@ -198,8 +222,11 @@ export function loadConfig(cwd?: string): AceToolConfig {
 	const token = readStringSetting("ACE_TOOL_TOKEN", stored.token);
 
 	return {
+		apiMode: maybeApiMode(process.env.ACE_TOOL_API_MODE) ?? stored.apiMode ?? "compat",
 		baseUrl,
 		token,
+		augmentSessionPath: readStringSetting("ACE_TOOL_AUGMENT_SESSION_PATH", stored.augmentSessionPath),
+		augmentAuthUrl: normalizeBaseUrl(readStringSetting("ACE_TOOL_AUGMENT_AUTH_URL", stored.augmentAuthUrl, "https://auth.augmentcode.com"), allowHttp),
 		maxLinesPerBlob: readPositiveIntSetting("ACE_TOOL_MAX_LINES_PER_BLOB", stored.maxLinesPerBlob, 800),
 		retrievalTimeoutMs: readPositiveIntSetting("ACE_TOOL_RETRIEVAL_TIMEOUT_SECS", stored.retrievalTimeoutSecs, 60) * 1000,
 		uploadTimeoutMs: readPositiveIntSetting("ACE_TOOL_UPLOAD_TIMEOUT_SECS", stored.uploadTimeoutSecs, 30) * 1000,
@@ -217,8 +244,18 @@ export function loadConfig(cwd?: string): AceToolConfig {
 
 export function validateConfig(config: AceToolConfig): string[] {
 	const issues: string[] = [];
-	if (!config.baseUrl) issues.push("ACE_TOOL_BASE_URL/baseUrl is required");
-	if (!config.token) issues.push("ACE_TOOL_TOKEN/token is required");
+	const hasCompatConfig = Boolean(config.baseUrl && config.token);
+	const hasAugmentSession = Boolean(getAugmentSession(config.augmentSessionPath));
+
+	if (config.apiMode === "compat") {
+		if (!config.baseUrl) issues.push("ACE_TOOL_BASE_URL/baseUrl is required in compat API mode");
+		if (!config.token) issues.push("ACE_TOOL_TOKEN/token is required in compat API mode");
+	} else if (config.apiMode === "official-oauth") {
+		if (!hasAugmentSession) issues.push("Augment OAuth session is required in official-oauth API mode; run /ace-login or set AUGMENT_SESSION_AUTH");
+	} else if (!hasAugmentSession && !hasCompatConfig) {
+		issues.push("auto API mode requires either Augment OAuth session (/ace-login or AUGMENT_SESSION_AUTH) or ACE_TOOL_BASE_URL + ACE_TOOL_TOKEN");
+	}
+
 	if (config.maxLinesPerBlob <= 0) issues.push("ACE_TOOL_MAX_LINES_PER_BLOB/maxLinesPerBlob must be positive");
 	if (config.retrievalTimeoutMs <= 0) issues.push("ACE_TOOL_RETRIEVAL_TIMEOUT_SECS/retrievalTimeoutSecs must be positive");
 	if (config.uploadTimeoutMs <= 0) issues.push("ACE_TOOL_UPLOAD_TIMEOUT_SECS/uploadTimeoutSecs must be positive");
