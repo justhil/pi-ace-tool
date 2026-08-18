@@ -1,5 +1,5 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
-import type { BuildSystemPromptOptions, ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { SelectList, Text, truncateToWidth, type Component, type SelectItem, type SelectListTheme, type TUI } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import {
@@ -532,40 +532,13 @@ function beginAceStatus(ctx: AceStatusContext, initial: string): { update: (valu
 	};
 }
 
-function buildAceSystemPrompt(cwd: string, options: Pick<BuildSystemPromptOptions, "selectedTools">): string {
+function buildAceSystemPrompt(cwd: string): string {
 	const config = loadConfig(cwd);
 	const issues = validateConfig(config);
 	if (issues.length > 0) {
 		return "Ace search_context unavailable: do not call it until the user configures ace-tool with /ace-config or logs in with /ace-login.";
 	}
-
-	const selectedTools = new Set(options.selectedTools ?? []);
-	const hasSelection = Boolean(options.selectedTools);
-	const hasTool = (name: string) => !hasSelection || selectedTools.has(name);
-	const companionTools = [
-		hasTool("read") ? "- Use read after search_context identifies candidate files, and whenever the file path is already known." : "",
-		hasTool("bash") ? "- Use bash with rg/grep/find/ls for exact identifiers, literal text, directory listing, and exhaustive reference searches." : "",
-		hasTool("edit") ? "- Use edit for precise changes after the target file and exact old text are known." : "",
-		hasTool("write") ? "- Use write for new files or intentional full rewrites; do not use search_context for file modification." : "",
-	].filter(Boolean);
-
-	return [
-		"## Ace search_context routing",
-		"search_context is the primary tool for semantic codebase discovery. Use it more often when the task depends on project implementation details that are not already located.",
-		"",
-		"Call search_context early when:",
-		"- relevant files, components, implementation flows, architecture, behavior, or tests are unknown;",
-		"- the user gives a natural-language coding task and you need project-specific context before planning or editing;",
-		"- grep/find would be too broad, or you do not know reliable exact keywords yet.",
-		"",
-		"Do not call search_context when:",
-		"- exact file paths or exact symbols are already known and a direct read or literal search is enough;",
-		"- you need exhaustive references, directory listing, file contents, or file modifications;",
-		"- search_context already returned candidate files and the next step is verification or editing.",
-		...(companionTools.length > 0 ? ["", "Keep using other tools:", ...companionTools] : []),
-		"",
-		"Search query format: concise natural language plus optional exact keywords from the user's request. Set project_root_path only when searching outside the current project.",
-	].join("\n");
+	return "";
 }
 
 function hasSearchContextTool(event: { systemPromptOptions?: { selectedTools?: unknown } }): boolean {
@@ -1071,23 +1044,12 @@ export default function piAceToolExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "search_context",
 		label: "Search Context",
-		description: `IMPORTANT: search_context is the primary semantic codebase discovery tool through an Augment-compatible remote API.
-
-Use search_context early when relevant files, components, implementation flows, architecture, behavior, or tests are unknown, especially before non-trivial code changes driven by natural-language requirements.
-
-Do NOT use search_context for exact identifier grep, exhaustive reference lists, literal text search, directory listing, reading a known file, or modifying files. Use bash/rg/grep/find/ls, read, edit, and write for those jobs when available.
-
-The tool indexes the current project, uploads new or changed code chunks to the configured Augment API, then asks the codebase retrieval endpoint for relevant context. Treat results as navigation and project context; read returned files before making precise changes. Output is truncated to 50KB/2000 lines if necessary.
-
-Configuration:
-- compat mode requires ACE_TOOL_BASE_URL and ACE_TOOL_TOKEN.
-- official-oauth mode requires /ace-login, ~/.augment/session.json, or AUGMENT_SESSION_AUTH.
-- auto mode prefers official-oauth and falls back to compat.`,
-		promptSnippet: "Semantic codebase discovery for unknown files, flows, architecture, tests, and project-specific implementation context",
+		description: "Semantic codebase discovery through an Augment-compatible API. It indexes new or changed project code and returns relevant project context for natural-language implementation questions; output may be truncated to 50KB/2000 lines. Configure compat mode with ACE_TOOL_BASE_URL and ACE_TOOL_TOKEN, official OAuth with /ace-login, ~/.augment/session.json, or AUGMENT_SESSION_AUTH; auto mode prefers OAuth and falls back to compat.",
+		promptSnippet: "Find project files and implementation context when the relevant code or flow is not yet known.",
 		promptGuidelines: [
-			"Use search_context early when the task requires project-specific context and relevant files, flows, architecture, behavior, or tests are unknown.",
-			"Do not use search_context for exact identifiers, literal text search, directory listings, known file reads, or edits; use bash/rg/grep/find/ls/read/edit/write for those when available.",
-			"After search_context returns likely files, read those files and continue with precise normal tools for verification and changes.",
+			"Use search_context early when project files, components, flows, architecture, behavior, or tests relevant to the task are unknown.",
+			"Use exact search or direct file tools instead for known paths or symbols, literal text, directory listings, exhaustive references, file contents, and modifications.",
+			"Treat results as navigation context: read candidate files before precise claims or changes, and search again only if verification shows the context is insufficient.",
 		],
 		parameters: SEARCH_CONTEXT_PARAMS,
 		prepareArguments(args): SearchContextParams {
@@ -1506,8 +1468,8 @@ Configuration:
 
 	pi.on("before_agent_start", (event, ctx) => {
 		if (!hasSearchContextTool(event)) return;
-		return {
-			systemPrompt: `${event.systemPrompt}\n\n${buildAceSystemPrompt(ctx.cwd, event.systemPromptOptions)}`,
-		};
+		const prompt = buildAceSystemPrompt(ctx.cwd);
+		if (!prompt) return;
+		return { systemPrompt: `${event.systemPrompt}\n\n${prompt}` };
 	});
 }

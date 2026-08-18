@@ -4,21 +4,16 @@ import type { AceToolConfig } from "./config.js";
 import { enhancePromptOfficial, extractEnhancedPrompt, parseChatHistory, replaceToolNames } from "./api.js";
 import { runSearchContext } from "./search-context.js";
 
-const ENHANCE_PROMPT_TEMPLATE = `⚠️ NO TOOLS ALLOWED ⚠️
+const ENHANCE_PROMPT_TEMPLATE = `Rewrite the instruction below so it is clearer, more specific, less ambiguous, actionable, and corrected where necessary. Use conversation history only to understand intent. Preserve code in triple backticks when it is a sample rather than instruction text.
 
-Here is an instruction that I'd like to give you, but it needs to be improved. Rewrite and enhance this instruction to make it clearer, more specific, less ambiguous, and correct any mistakes. Do not use any tools: reply immediately with your answer, even if you're not sure. Consider the context of our conversation history when enhancing the prompt. If there is code in triple backticks (\`\`\`) consider whether it is a code sample and should remain unchanged.Reply with the following format:
+Return exactly:
+<augment-enhanced-prompt>enhanced prompt</augment-enhanced-prompt>
 
-### BEGIN RESPONSE ###
-Here is an enhanced version of the original instruction that is more specific and clear:
-<augment-enhanced-prompt>enhanced prompt goes here</augment-enhanced-prompt>
+<original_request>
+{original_prompt}
+</original_request>`;
 
-### END RESPONSE ###
-
-Here is my original instruction:
-
-{original_prompt}`;
-
-const PI_MODEL_SYSTEM_PROMPT = "You are a prompt-enhancement engine. Rewrite user instructions into clearer, more specific, actionable prompts. Do not solve or implement the task. Do not call tools. Return only the enhanced prompt text.";
+const PI_MODEL_SYSTEM_PROMPT = "You rewrite user instructions without answering or implementing them. Do not call tools. Return only the rewritten prompt, preserving the original language unless explicitly asked otherwise.";
 const SEARCH_CONTEXT_CHAR_LIMIT = 12_000;
 const NO_RELEVANT_CODE_CONTEXT = "No relevant code context found for your query.";
 
@@ -71,13 +66,11 @@ function buildThirdPartyPrompt(originalPrompt: string): string {
 }
 
 function buildPiModelPrompt(originalPrompt: string): string {
-	const languageHint = isChineseText(originalPrompt) ? "请用中文输出增强后的提示词。" : "Return the enhanced prompt in English unless the original request uses another language.";
+	const languageHint = isChineseText(originalPrompt) ? "请用中文输出。" : "Preserve the original request's language.";
 	return [
-		"Rewrite and enhance the following instruction to make it clearer, more specific, less ambiguous, and more actionable.",
-		"Do not answer or implement the instruction. Only rewrite it.",
-		"Preserve code blocks exactly unless they are clearly part of the instruction text.",
+		"Rewrite the request for clarity, specificity, correctness, and actionability.",
+		"Preserve code blocks exactly unless they are instruction text.",
 		languageHint,
-		"Return only the enhanced prompt text, with no preamble, no explanation, and no markdown fence.",
 		"",
 		"<original_request>",
 		originalPrompt,
